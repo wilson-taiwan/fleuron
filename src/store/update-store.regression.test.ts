@@ -11,11 +11,22 @@ vi.mock("../lib/api", () => ({
     updateDownload: vi.fn(),
     updateCancelDownload: vi.fn(),
     updateInstall: vi.fn(),
+    // Draft-preflight surface used by installUpdate.
+    noteRecoveryStatus: vi.fn().mockResolvedValue({ available: true, error: null }),
+    listNoteDrafts: vi.fn().mockResolvedValue([]),
+    approveUpdateDeparture: vi.fn().mockResolvedValue({
+      token: "test-approval",
+      project_key: null,
+      epoch: null,
+      draft_write_seq: 0,
+    }),
   },
 }));
 
 import { api } from "../lib/api";
 import { useUpdateStore } from "./update-store";
+import { useNoteDepartureStore } from "./note-departure-store";
+import { useNoteDraftStore, type NoteDraftEntry } from "./note-draft-store";
 
 const availableStatus = {
   phase: "available" as const,
@@ -74,5 +85,76 @@ describe("v0.27 updater ordering regression", () => {
 
     await useUpdateStore.getState().runPrimaryAction();
     expect(api.updateInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the draft preflight before install and passes its approval token", async () => {
+    vi.mocked(api.updateInstall).mockResolvedValue({
+      ...availableStatus,
+      phase: "preparing",
+    });
+
+    await useUpdateStore.getState().installUpdate();
+
+    expect(api.approveUpdateDeparture).toHaveBeenCalledTimes(1);
+    expect(api.updateInstall).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.updateInstall).mock.calls[0][0]).toBe("test-approval");
+  });
+
+  it("cancelling the draft preflight installs nothing and mutates nothing", async () => {
+    // One attached dirty draft forces the typed choice prompt.
+    const key = "proj-1::coding::coding-1";
+    const dirty: NoteDraftEntry = {
+      key,
+      projectKey: "proj-1",
+      kind: "coding",
+      targetId: "coding-1",
+      interviewId: "iv-1",
+      epoch: "epoch-1",
+      draftId: "draft-1",
+      revision: 1,
+      ackedRevision: 1,
+      baseText: "",
+      draftText: "unsaved",
+      saveState: "dirty",
+      saveError: null,
+      conflictText: null,
+      targetMissing: false,
+      epochStale: false,
+      recoveryState: "backed-up",
+      recoveryError: null,
+      putInFlight: false,
+      queuedText: null,
+      saveInFlight: false,
+      saveQueued: false,
+      discardRequested: false,
+      context: {
+        coderName: "Ada",
+        participantLabel: "P01",
+        segmentId: "seg-1",
+        segmentIndex: 0,
+        charStart: null,
+        charEnd: null,
+        quoteText: null,
+      },
+      updatedAt: Date.now(),
+    };
+    useNoteDraftStore.setState({
+      workspace: { projectKey: "proj-1", epoch: "epoch-1" },
+      entries: { [key]: dirty },
+      frozen: false,
+    });
+
+    const install = useUpdateStore.getState().installUpdate();
+    // The prompt is up; cancel it like a user would.
+    await vi.waitFor(() => {
+      expect(useNoteDepartureStore.getState().prompt).not.toBeNull();
+    });
+    useNoteDepartureStore.getState().choose("cancelled");
+    await install;
+
+    expect(api.approveUpdateDeparture).not.toHaveBeenCalled();
+    expect(api.updateInstall).not.toHaveBeenCalled();
+    expect(useNoteDraftStore.getState().frozen).toBe(false);
+    useNoteDraftStore.getState().clearWorkspace();
   });
 });

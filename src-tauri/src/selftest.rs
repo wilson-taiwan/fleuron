@@ -119,6 +119,7 @@ pub async fn selftest_sign_in_as(
 
 #[tauri::command]
 pub fn selftest_seed_unbound(
+    app: AppHandle,
     state: State<'_, AppState>,
     coder_name: String,
 ) -> Result<String, String> {
@@ -135,13 +136,16 @@ pub fn selftest_seed_unbound(
 
     *state.project_path.lock().map_err(|e| e.to_string())? = Some(PathBuf::from(&path_str));
     *state.db.lock().map_err(|e| e.to_string())? = Some(opened_conn);
+    // Synthetic projects rotate like real opens, so checked-write tests run
+    // against a live epoch rather than a stale one.
+    let _ = state.rotate_workspace(&app, &proj_dir, "Selftest Study Unbound");
 
     Ok(path_str)
 }
 
 #[tauri::command]
 pub fn selftest_seed(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     _suite: String,
 ) -> Result<serde_json::Value, String> {
@@ -193,6 +197,7 @@ pub fn selftest_seed(
         access_token: "selftest-token".to_string(),
         refresh_token: "selftest-refresh-token".to_string(),
     });
+    let _ = state.rotate_workspace(&app, &proj_dir, "Selftest Study");
 
     Ok(serde_json::json!({
         "project_path": path_str,

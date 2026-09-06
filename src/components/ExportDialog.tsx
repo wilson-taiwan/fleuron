@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../store/app-store";
 import { useProjectStore } from "../store/project-store";
+import { useNoteDraftStore } from "../store/note-draft-store";
+import { useNoteDepartureStore } from "../store/note-departure-store";
+import { api } from "../lib/api";
 import {
   type ExportConfig,
   type ExportItem,
@@ -125,21 +128,21 @@ export function ExportDialog({
     if (config.items.includes("report-html")) {
       files.push({
         name: "report.html",
-        desc: "Standalone HTML report with light tokens & print stylesheet",
+        desc: "Readable in a browser and ready to print",
         icon: "note",
       });
     }
     if (config.items.includes("report-pdf")) {
       files.push({
         name: "report.pdf",
-        desc: "Formatted PDF report with light theme tokens",
+        desc: "Formatted PDF ready to share or print",
         icon: "note",
       });
     }
     if (config.items.includes("coded-segments")) {
       files.push({
         name: "coded-segments.csv",
-        desc: "UTF-8 BOM CSV table of all coded extracts",
+        desc: "Spreadsheet of coded passages",
         icon: "code",
       });
     }
@@ -158,13 +161,56 @@ export function ExportDialog({
     return files;
   }, [config.items]);
 
+  // Final preflight: recheck at Export to Folder when draft revisions changed
+  // while the options were open. The opening preflight already settled
+  // drafts; a quiet dialog must not re-prompt when nothing changed.
+  const [openedDirtySignature, setOpenedDirtySignature] = useState<string>("");
+  const [orphanExcludedCount, setOrphanExcludedCount] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const drafts = useNoteDraftStore.getState();
+    const signature = drafts
+      .dirtyEntries()
+      .map((e) => `${e.key}:${e.revision}`)
+      .sort()
+      .join("|");
+    setOpenedDirtySignature(signature);
+    void api
+      .listNoteDrafts()
+      .then((listed) => {
+        setOrphanExcludedCount(listed.filter((d) => d.draft_text !== d.base_text).length);
+      })
+      .catch(() => setOrphanExcludedCount(0));
+  }, [open ]);
+
   const handleExport = async () => {
     try {
+      const drafts = useNoteDraftStore.getState();
+      const currentSignature = drafts
+        .dirtyEntries()
+        .map((e) => `${e.key}:${e.revision}`)
+        .sort()
+        .join("|");
+      if (currentSignature !== openedDirtySignature) {
+        // New edits landed while the options were open: settle them first
+        // instead of exporting a mix of saved and half-typed notes.
+        const gate = await useNoteDepartureStore.getState().requestDeparture("export");
+        if (!gate.proceed) return;
+        setOpenedDirtySignature(
+          useNoteDraftStore
+            .getState()
+            .dirtyEntries()
+            .map((e) => `${e.key}:${e.revision}`)
+            .sort()
+            .join("|"),
+        );
+      }
       const selected = await openDialog({
         directory: true,
         multiple: false,
         title: "Choose Export Destination",
       });
+      // Cancelling the folder picker keeps drafts and editing state intact.
       if (!selected || typeof selected !== "string") return;
 
       const result = await exportWithConfig(selected, config);
@@ -215,6 +261,13 @@ export function ExportDialog({
           <strong>{unresolvedConflictCount} unresolved sync conflict{unresolvedConflictCount === 1 ? "" : "s"}.</strong>{" "}
           This export uses the current canonical values; pending proposals are not merged into analysis.
         </div>
+      )}
+      {orphanExcludedCount > 0 && (
+        <p className="hint mb-5 text-[12.5px]">
+          {orphanExcludedCount === 1
+            ? "1 recovered draft has no coding and will remain in Unfinished notes; it is excluded from this export."
+            : `${orphanExcludedCount} recovered drafts have no coding and will remain in Unfinished notes; they are excluded from this export.`}
+        </p>
       )}
       {redactedCount > 0 && (
         <p className="hint mb-5 text-[12.5px]">
@@ -297,7 +350,7 @@ export function ExportDialog({
                       onChange={() => handleToggleItem("memos")}
                       className="rounded text-[var(--accent)]"
                     />
-                    <span>Hub memos &amp; analytic notes</span>
+                    <span>Interview and passage notes</span>
                   </label>
                   <label className="flex items-center gap-2 text-[13px] cursor-pointer">
                     <input
@@ -321,7 +374,7 @@ export function ExportDialog({
                   onChange={() => handleToggleItem("coded-segments")}
                   className="rounded text-[var(--accent)]"
                 />
-                <span className="font-medium">Coded Passages CSV (UTF-8 BOM)</span>
+                <span className="font-medium">Coded passages spreadsheet (CSV)</span>
               </label>
               <label className="flex items-center gap-2.5 text-[13.5px] cursor-pointer">
                 <input
@@ -402,7 +455,7 @@ export function ExportDialog({
                   key={file.name}
                   className="rounded-xl border border-[var(--g-rim)] bg-[var(--surface-card)] p-2.5 flex items-start gap-2.5"
                 >
-                  <span className="mt-0.5 text-[var(--accent-ink)]">
+                  <span className="mt-0.5 text-[var(--ink-2)]">
                     <Icon name={file.icon} size={15} />
                   </span>
                   <div className="min-w-0 flex-1">

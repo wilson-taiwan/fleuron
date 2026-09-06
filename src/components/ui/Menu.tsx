@@ -64,6 +64,8 @@ export interface MenuItemSpec {
   /** Right-aligned shortcut hint. Build it with `shortcut()` from lib/platform
    *  rather than hardcoding "⌘⇧E" — the modifier differs per platform. */
   shortcut?: string;
+  /** Numeric badge (e.g. unfinished-note count). Hidden when 0/undefined. */
+  badge?: number;
   /** Section heading to group items under. */
   section?: string;
   /** Renders in the danger colour and sits below a divider. */
@@ -222,6 +224,15 @@ export function MenuRow({
       >
         <Icon name={item.icon} size={15} />
         <span className="flex-1">{item.label}</span>
+        {item.badge != null && item.badge > 0 ? (
+          <span
+            className="grid min-h-5 min-w-5 place-items-center rounded-full px-1 text-[10.5px] font-semibold"
+            style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
+            aria-label={`${item.badge} unfinished`}
+          >
+            {item.badge}
+          </span>
+        ) : null}
         {item.shortcut && (
           <span
             className="font-mono text-[11px]"

@@ -527,6 +527,99 @@ function resetFixture() {
 
 resetFixture();
 
+// --- note drafts: workspace identity + recovery mirror -----------------------
+// Mirrors the backend's checked-write contract (epoch/project-key validation,
+// revision CAS, tombstones, conditional cleanup) so the browser preview
+// exercises the real draft lifecycle without a Rust backend.
+let mockProjectKey: string | null = "mock-project-key-1";
+let mockEpoch: string | null = "mock-epoch-1";
+let mockDraftSeq = 0;
+
+// Like the backend's register_project: the key is stable per resolved study
+// path (clones stay separate), and every open re-establishes it — a close
+// must never leave a later open keyless while carrying a fresh epoch.
+const mockProjectKeys = new Map<string, string>([
+  ["/Users/demo/Drive/sample-study.fleuron", "mock-project-key-1"],
+]);
+
+function mockKeyForStudy(path: string): string {
+  let key = mockProjectKeys.get(path);
+  if (!key) {
+    key = `mock-project-key-${mockProjectKeys.size + 1}`;
+    mockProjectKeys.set(path, key);
+  }
+  mockProjectKey = key;
+  return key;
+}
+
+function rotateMockWorkspace() {
+  mockEpoch = `mock-epoch-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+type MockDraft = {
+  draft_id: string;
+  project_key: string;
+  kind: string;
+  target_id: string;
+  interview_id: string;
+  coder_name: string | null;
+  base_text: string;
+  draft_text: string;
+  revision: number;
+  participant_label: string;
+  segment_id: string | null;
+  segment_index: number | null;
+  char_start: number | null;
+  char_end: number | null;
+  quote_text: string | null;
+  updated_at: string;
+  discarded: boolean;
+  project_title: string | null;
+};
+
+const mockDrafts = new Map<string, MockDraft>();
+
+function mockLiveMemo(kind: string, targetId: string): string | null {
+  if (noteFault("missing") && kind === "coding") return null;
+  if (kind === "coding") {
+    const coding = codedSegments.find((c) => c.id === targetId);
+    return coding ? (coding.memo ?? "") : null;
+  }
+  const interview = interviews.find((i) => i.id === targetId);
+  return interview ? (interview.hub_memo ?? "") : null;
+}
+
+function mockActiveDraft(projectKey: string, kind: string, targetId: string) {
+  for (const draft of mockDrafts.values()) {
+    if (
+      !draft.discarded &&
+      draft.project_key === projectKey &&
+      draft.kind === kind &&
+      draft.target_id === targetId
+    ) {
+      return draft;
+    }
+  }
+  return null;
+}
+
+/** Explicit dev-mock fault fixtures for the note lifecycle surfaces. */
+function noteFault(name: "recovery" | "commit" | "slow" | "changed" | "missing"): boolean {
+  if (typeof window === "undefined") return false;
+  const text = window.location.search + window.location.hash;
+  if (name === "slow") return text.includes("fixture=note-commit-slow");
+  return text.includes(`fixture=note-${name}-fail`) || text.includes(`fixture=note-${name}`);
+}
+
+function checkMockWorkspace(projectKey: string, epoch: string): boolean {
+  return (
+    mockProjectKey !== null &&
+    mockEpoch !== null &&
+    projectKey === mockProjectKey &&
+    epoch === mockEpoch
+  );
+}
+
 /** Snapshots the browser harness pretends to hold. Empty at first, like a real project's. */
 const mockBackups: {
   path: string;
@@ -587,6 +680,8 @@ function buildSnapshot(): ProjectOpenSnapshot {
         total: 19,
       },
     },
+    project_key: mockProjectKey,
+    workspace_epoch: mockEpoch,
   };
 }
 
@@ -729,7 +824,7 @@ function mockExport(
   };
 }
 
-function handle(cmd: string, args: Record<string, unknown>): unknown {
+async function handle(cmd: string, args: Record<string, unknown>): Promise<unknown> {
   // fixture=server-conflict keeps the study on protocol 2 so the sheet's
   // conflict branch (which requires v2) actually renders. Applied lazily
   // because mockSync is declared below module scope's resetFixture() call.
@@ -758,10 +853,14 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
     case "create_project":
       resetFixture();
       openProject = DEMO;
+      mockKeyForStudy((args.input as { project_name?: string })?.project_name ?? DEMO.path as string);
+      rotateMockWorkspace();
       return DEMO;
     case "open_project":
       resetFixture();
       openProject = DEMO;
+      mockKeyForStudy(String(args.path ?? DEMO.path));
+      rotateMockWorkspace();
       return buildSnapshot();
     case "get_project_info":
       return openProject ?? DEMO;
@@ -801,6 +900,8 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
         },
         local_revision: 0,
         reviewed_segment_ids: [],
+        project_key: mockProjectKey,
+        workspace_epoch: mockEpoch,
       };
     }
     case "adopt_project_coder": {
@@ -813,6 +914,8 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
     }
     case "close_project":
       openProject = null;
+      mockProjectKey = null;
+      mockEpoch = null;
       return null;
 
     // --- content ----------------------------------------------------------
@@ -857,6 +960,8 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
       return mockBackups[0];
 
     case "restore_backup":
+      mockKeyForStudy(DEMO.path as string);
+      rotateMockWorkspace();
       return {
         restored_from: args?.backupPath as string,
         restored: mockBackups[0],
@@ -1238,9 +1343,12 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
       };
     }
     case "patch_coding_memo": {
+      if (noteFault("commit")) {
+        throw new Error("Simulated write rejection (fixture=note-commit-fail).");
+      }
       const input = args.input as { coded_segment_id: string; memo?: string };
       const coded = codedSegments.find((candidate) => candidate.id === input.coded_segment_id);
-      if (!coded) return null;
+      if (!coded) throw new Error("That note's coding is no longer available.");
       coded.memo = input.memo ?? null;
       return { ...coded, code_ids: [...coded.code_ids] };
     }
@@ -1251,14 +1359,249 @@ function handle(cmd: string, args: Record<string, unknown>): unknown {
     }
     case "import_segments":
       return segments.length;
-    case "update_hub_memo":
-    case "save_workspace_state":
-      if (cmd === "save_workspace_state") {
-        workspace = args.workspace as typeof workspace;
+    case "update_hub_memo": {
+      if (noteFault("commit")) {
+        throw new Error("Simulated write rejection (fixture=note-commit-fail).");
       }
+      const interview = interviews.find((i) => i.id === args.interviewId);
+      if (!interview) throw new Error("That interview is no longer available.");
+      interview.hub_memo = args.memo as string;
+      return null;
+    }
+    case "save_workspace_state":
+      workspace = args.workspace as typeof workspace;
       return null;
     case "get_workspace_state":
       return workspace;
+
+    // --- note drafts: local recovery mirror --------------------------------
+    case "note_recovery_status":
+      return noteFault("recovery")
+        ? {
+            available: false,
+            error: "Draft recovery is unavailable (fixture=note-recovery-fail). Editing still works in memory.",
+          }
+        : { available: true, error: null };
+    case "list_note_drafts":
+      return [...mockDrafts.values()]
+        .filter((d) => !d.discarded)
+        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+        .map((d) => ({ ...d }));
+    case "begin_note_draft": {
+      if (noteFault("recovery")) {
+        throw new Error("Draft recovery is unavailable (fixture=note-recovery-fail). Editing still works in memory.");
+      }
+      const input = args.input as {
+        project_key: string;
+        epoch: string;
+        kind: string;
+        target_id: string;
+        interview_id: string;
+        coder_name?: string | null;
+        participant_label: string;
+        segment_id?: string | null;
+        segment_index?: number | null;
+        char_start?: number | null;
+        char_end?: number | null;
+        quote_text?: string | null;
+      };
+      if (!checkMockWorkspace(input.project_key, input.epoch)) {
+        return { status: "stale-workspace" };
+      }
+      const live = mockLiveMemo(input.kind, input.target_id);
+      if (live === null) return { status: "missing-target" };
+      const existing = mockActiveDraft(input.project_key, input.kind, input.target_id);
+      if (existing) {
+        if (input.participant_label && existing.participant_label !== input.participant_label) {
+          existing.participant_label = input.participant_label;
+        }
+        return { status: "active", record: { ...existing }, committed_text: live };
+      }
+      for (const [id, draft] of mockDrafts) {
+        if (
+          draft.discarded &&
+          draft.project_key === input.project_key &&
+          draft.kind === input.kind &&
+          draft.target_id === input.target_id
+        ) {
+          mockDrafts.delete(id);
+        }
+      }
+      const record: MockDraft = {
+        draft_id: `mock-draft-${mockDrafts.size + 1}-${Date.now()}`,
+        project_key: input.project_key,
+        kind: input.kind,
+        target_id: input.target_id,
+        interview_id: input.interview_id,
+        coder_name: input.coder_name ?? null,
+        base_text: live,
+        draft_text: live,
+        revision: 0,
+        participant_label: input.participant_label,
+        segment_id: input.segment_id ?? null,
+        segment_index: input.segment_index ?? null,
+        char_start: input.char_start ?? null,
+        char_end: input.char_end ?? null,
+        quote_text: input.quote_text ?? null,
+        updated_at: new Date().toISOString(),
+        discarded: false,
+        project_title: "Sample Study",
+      };
+      mockDrafts.set(record.draft_id, record);
+      mockDraftSeq += 1;
+      return { status: "active", record: { ...record }, committed_text: live };
+    }
+    case "put_note_draft": {
+      if (noteFault("recovery")) {
+        throw new Error("Draft recovery is unavailable (fixture=note-recovery-fail). Editing still works in memory.");
+      }
+      const input = args.input as {
+        project_key: string;
+        epoch: string;
+        draft_id: string;
+        expected_revision: number;
+        draft_text: string;
+      };
+      if (!checkMockWorkspace(input.project_key, input.epoch)) {
+        return { status: "stale-workspace" };
+      }
+      const draft = mockDrafts.get(input.draft_id);
+      if (!draft || draft.discarded) return { status: "stale-generation" };
+      if (draft.revision !== input.expected_revision) {
+        return { status: "revision-mismatch", record: { ...draft } };
+      }
+      draft.draft_text = input.draft_text;
+      draft.revision += 1;
+      draft.updated_at = new Date().toISOString();
+      mockDraftSeq += 1;
+      return { status: "stored", record: { ...draft } };
+    }
+    case "discard_note_draft": {
+      if (noteFault("recovery")) {
+        throw new Error("Draft recovery is unavailable (fixture=note-recovery-fail). Editing still works in memory.");
+      }
+      const input = args.input as { draft_id: string };
+      const draft = mockDrafts.get(input.draft_id);
+      if (!draft) throw new Error("That unfinished note is no longer in local recovery.");
+      draft.discarded = true;
+      draft.draft_text = "";
+      draft.base_text = "";
+      draft.updated_at = new Date().toISOString();
+      mockDraftSeq += 1;
+      return { draft_id: draft.draft_id, revision: draft.revision };
+    }
+    case "save_note_draft": {
+      if (noteFault("commit")) {
+        throw new Error("Simulated write rejection (fixture=note-commit-fail).");
+      }
+      if (noteFault("slow")) {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      const input = args.input as {
+        project_key: string;
+        epoch: string;
+        draft_id: string;
+        revision: number;
+        kind: string;
+        target_id: string;
+        expected_saved_text: string;
+        draft_text: string;
+      };
+      if (!checkMockWorkspace(input.project_key, input.epoch)) {
+        return { status: "stale-workspace" };
+      }
+      const memoryOnly = !input.draft_id;
+      const draft = memoryOnly ? null : mockDrafts.get(input.draft_id);
+      if (!memoryOnly && (!draft || draft.discarded)) {
+        return { status: "stale-generation" };
+      }
+      let live = mockLiveMemo(input.kind, input.target_id);
+      if (live === null) return { status: "missing-target" };
+      if (noteFault("changed")) {
+        // Something committed under the draft: force the comparison branch.
+        live = "Changed under you while you were typing (fixture=note-changed).";
+        if (input.kind === "coding") {
+          const coding = codedSegments.find((c) => c.id === input.target_id);
+          if (coding) coding.memo = live;
+        } else {
+          const interview = interviews.find((i) => i.id === input.target_id);
+          if (interview) interview.hub_memo = live;
+        }
+      }
+      if (live !== input.expected_saved_text) {
+        return { status: "conflict", current_text: live };
+      }
+      if (input.kind === "coding") {
+        const coding = codedSegments.find((c) => c.id === input.target_id);
+        if (coding) coding.memo = input.draft_text || null;
+      } else {
+        const interview = interviews.find((i) => i.id === input.target_id);
+        if (interview) interview.hub_memo = input.draft_text;
+      }
+      mockDraftSeq += 1;
+      let recoveryCleared = false;
+      if (draft) {
+        if (draft.revision > input.revision) draft.base_text = input.draft_text;
+        if (draft.revision === input.revision) {
+          mockDrafts.delete(draft.draft_id);
+          recoveryCleared = true;
+        }
+      }
+      return {
+        status: "saved",
+        draft_id: input.draft_id,
+        revision: input.revision,
+        committed_text: input.draft_text,
+        recovery_cleared: recoveryCleared,
+      };
+    }
+    case "resolve_note_draft_target": {
+      const draft = mockDrafts.get(args.draftId as string);
+      if (!draft || draft.discarded) {
+        throw new Error("That unfinished note is no longer in local recovery.");
+      }
+      if (!openProject || !mockProjectKey) {
+        return { status: "missing", draft_id: draft.draft_id, reason: "no-project" };
+      }
+      if (draft.project_key !== mockProjectKey) {
+        return { status: "missing", draft_id: draft.draft_id, reason: "other-project" };
+      }
+      const live = mockLiveMemo(draft.kind, draft.target_id);
+      if (live === null) {
+        return { status: "missing", draft_id: draft.draft_id, reason: "deleted" };
+      }
+      if (draft.kind === "coding") {
+        const coding = codedSegments.find((c) => c.id === draft.target_id);
+        return {
+          status: "live-coding",
+          draft_id: draft.draft_id,
+          interview_id: coding?.interview_id ?? draft.interview_id,
+          participant_label: coding?.participant_label ?? draft.participant_label,
+          committed_text: live,
+        };
+      }
+      const interview = interviews.find((i) => i.id === draft.target_id);
+      return {
+        status: "live-interview",
+        draft_id: draft.draft_id,
+        participant_label: interview?.participant_label ?? draft.participant_label,
+        committed_text: live,
+      };
+    }
+    case "set_recovery_root_for_selftest":
+      return null;
+    case "approve_update_departure":
+      return {
+        token: `mock-approval-${Date.now()}`,
+        project_key: mockProjectKey,
+        epoch: mockEpoch,
+        draft_write_seq: mockDraftSeq,
+      };
+    case "complete_note_departure":
+      return {
+        intent_id: args.intentId as string,
+        replayed: (args.approved as boolean) ? "close" : "cancelled",
+      };
     case "clear_workspace":
       return {
         cleared_coded_segments: 2,

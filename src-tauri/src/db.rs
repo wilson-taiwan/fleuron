@@ -2534,6 +2534,10 @@ pub fn get_open_project_snapshot(
         recent_code_ids,
         reviewed_segment_ids,
         diagnostics,
+        // Bound by the caller in commands.rs once the connection is live:
+        // the database layer must not mint workspace identity.
+        project_key: None,
+        workspace_epoch: None,
     })
 }
 
@@ -2695,6 +2699,9 @@ pub fn get_live_workspace_snapshot(
         sync_status,
         local_revision,
         reviewed_segment_ids,
+        // Bound by the caller in commands.rs from live AppState.
+        project_key: None,
+        workspace_epoch: None,
     })
 }
 
@@ -5067,10 +5074,16 @@ fn map_coded_segment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodedSegme
 }
 
 pub fn update_hub_memo(conn: &Connection, interview_id: &str, memo: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE interviews SET hub_memo = ?1, updated_at = ?2 WHERE id = ?3",
+    // Requires exactly one live row: a missing or deleted interview used to
+    // report success while writing nothing, which the old autosave then
+    // acknowledged as Saved.
+    let changed = conn.execute(
+        "UPDATE interviews SET hub_memo = ?1, updated_at = ?2 WHERE id = ?3 AND deleted = 0",
         params![memo, now_iso(), interview_id],
     )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 

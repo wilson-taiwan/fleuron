@@ -43,8 +43,8 @@ export const OFFICIAL_URLS = {
 
 /** The two manual downloads. Other release assets are updater internals or optional QA runners. */
 export const CANONICAL_ASSETS = {
-  macos: "Fleuron_2.5.0_universal.dmg",
-  windows: "Fleuron_2.5.0_x64-setup.exe",
+  macos: "Fleuron_2.6.0_universal.dmg",
+  windows: "Fleuron_2.6.0_x64-setup.exe",
 } as const;
 
 /**
@@ -54,7 +54,7 @@ export const CANONICAL_ASSETS = {
 export const UPDATER_INFRASTRUCTURE_ASSETS = [
   "Fleuron_universal.app.tar.gz",
   "Fleuron_universal.app.tar.gz.sig",
-  "Fleuron_2.5.0_x64-setup.exe.sig",
+  "Fleuron_2.6.0_x64-setup.exe.sig",
   "latest.json",
 ] as const;
 

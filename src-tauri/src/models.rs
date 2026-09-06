@@ -596,6 +596,14 @@ pub struct ProjectOpenSnapshot {
     pub recent_code_ids: Vec<String>,
     pub reviewed_segment_ids: Vec<String>,
     pub diagnostics: ProjectOpenDiagnostics,
+    /// Local-study UUID this open is bound to (recovery scope). Additive:
+    /// absent in snapshots built before the recovery release.
+    #[serde(default)]
+    pub project_key: Option<String>,
+    /// Backend workspace epoch for checked note writes. Rotated on every
+    /// open/replacement; writes carrying an older epoch fail closed.
+    #[serde(default)]
+    pub workspace_epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -648,6 +656,12 @@ pub struct LiveWorkspaceSnapshot {
     pub sync_status: LiveWorkspaceSyncStatus,
     pub local_revision: i64,
     pub reviewed_segment_ids: Vec<String>,
+    /// Local-study UUID this open is bound to (recovery scope). Additive.
+    #[serde(default)]
+    pub project_key: Option<String>,
+    /// Current backend workspace epoch for checked note writes. Additive.
+    #[serde(default)]
+    pub workspace_epoch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -661,4 +675,229 @@ pub struct ProjectDeletionSummary {
     pub interview_count: usize,
     pub coded_segment_count: usize,
     pub memo_count: usize,
+}
+
+// ── Note drafts: local crash recovery + checked writes ──────────────────────
+//
+// Recovery drafts stay on this computer. They are not committed notes, never
+// sync, and never enter exports or study backups. Field names are snake_case
+// to match the existing IPC convention (see PatchCodingMemoInput).
+
+/// One unfinished note generation, as stored in the app-local recovery DB.
+/// A new `draft_id` starts a new generation: late writes carrying an old id
+/// fail instead of resurrecting discarded text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteDraftRecord {
+    pub draft_id: String,
+    pub project_key: String,
+    pub kind: String,
+    pub target_id: String,
+    pub interview_id: String,
+    pub coder_name: Option<String>,
+    pub base_text: String,
+    pub draft_text: String,
+    pub revision: i64,
+    pub participant_label: String,
+    pub segment_id: Option<String>,
+    pub segment_index: Option<i64>,
+    pub char_start: Option<i64>,
+    pub char_end: Option<i64>,
+    pub quote_text: Option<String>,
+    pub updated_at: String,
+    pub discarded: bool,
+    /// Study title at list time (JOINed from recovery_projects). Absent on
+    /// single-record reads; the recovery list uses it for grouping.
+    #[serde(default)]
+    pub project_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeginNoteDraftInput {
+    pub project_key: String,
+    pub epoch: String,
+    pub kind: String,
+    pub target_id: String,
+    pub interview_id: String,
+    pub coder_name: Option<String>,
+    pub participant_label: String,
+    pub segment_id: Option<String>,
+    pub segment_index: Option<i64>,
+    pub char_start: Option<i64>,
+    pub char_end: Option<i64>,
+    pub quote_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum BeginNoteDraftResult {
+    Active {
+        // Boxed: the enum would otherwise carry a 370-byte variant next to
+        // fieldless ones. Serde is transparent over Box, so the IPC JSON is
+        // unchanged.
+        record: Box<NoteDraftRecord>,
+        committed_text: String,
+    },
+    MissingTarget,
+    StaleWorkspace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutNoteDraftInput {
+    pub project_key: String,
+    pub epoch: String,
+    pub draft_id: String,
+    pub expected_revision: i64,
+    pub draft_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum PutNoteDraftResult {
+    Stored { record: NoteDraftRecord },
+    RevisionMismatch { record: NoteDraftRecord },
+    StaleGeneration,
+    StaleWorkspace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscardNoteDraftInput {
+    pub draft_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscardNoteDraftResult {
+    pub draft_id: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveNoteDraftInput {
+    pub project_key: String,
+    pub epoch: String,
+    pub draft_id: String,
+    pub revision: i64,
+    pub kind: String,
+    pub target_id: String,
+    pub expected_saved_text: String,
+    pub draft_text: String,
+}
+
+/// Typed commit outcome. IO failures reject the command with friendly text;
+/// every content/workspace outcome below resolves normally so the UI can
+/// show the truthful state (a conflict is not a crash).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum SaveNoteDraftResult {
+    Saved {
+        draft_id: String,
+        revision: i64,
+        committed_text: String,
+        recovery_cleared: bool,
+    },
+    Conflict {
+        current_text: String,
+    },
+    MissingTarget,
+    StaleWorkspace,
+    StaleGeneration,
+}
+
+impl SaveNoteDraftResult {
+    pub fn ready_to_save(committed_text: String) -> Self {
+        // Filled in by the caller with identity/revision once the commit and
+        // the conditional recovery cleanup have both run.
+        SaveNoteDraftResult::Saved {
+            draft_id: String::new(),
+            revision: -1,
+            committed_text,
+            recovery_cleared: false,
+        }
+    }
+
+    pub fn conflict(current_text: String) -> Self {
+        SaveNoteDraftResult::Conflict { current_text }
+    }
+
+    pub fn missing_target() -> Self {
+        SaveNoteDraftResult::MissingTarget
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ResolveNoteDraftTargetResult {
+    LiveCoding {
+        draft_id: String,
+        interview_id: String,
+        participant_label: String,
+        committed_text: String,
+    },
+    LiveInterview {
+        draft_id: String,
+        participant_label: String,
+        committed_text: String,
+    },
+    Missing {
+        draft_id: String,
+        reason: String,
+    },
+}
+
+impl ResolveNoteDraftTargetResult {
+    pub fn live_coding(
+        draft_id: String,
+        interview_id: String,
+        participant_label: String,
+        committed_text: String,
+    ) -> Self {
+        ResolveNoteDraftTargetResult::LiveCoding {
+            draft_id,
+            interview_id,
+            participant_label,
+            committed_text,
+        }
+    }
+
+    pub fn live_interview(
+        draft_id: String,
+        participant_label: String,
+        committed_text: String,
+    ) -> Self {
+        ResolveNoteDraftTargetResult::LiveInterview {
+            draft_id,
+            participant_label,
+            committed_text,
+        }
+    }
+
+    pub fn missing(draft_id: String, reason: &str) -> Self {
+        ResolveNoteDraftTargetResult::Missing {
+            draft_id,
+            reason: reason.to_string(),
+        }
+    }
+}
+
+/// One-use approval minted by the frontend after its draft preflight, so the
+/// native updater entry can prove it did not bypass unsaved work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateDepartureApproval {
+    pub token: String,
+    pub project_key: Option<String>,
+    pub epoch: Option<String>,
+    pub draft_write_seq: u64,
+}
+
+/// Outcome of completing a native close/quit intent from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepartureCompletion {
+    pub intent_id: String,
+    pub replayed: String,
+}
+
+/// App-local recovery health for the draft UI surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryStatus {
+    pub available: bool,
+    pub error: Option<String>,
 }

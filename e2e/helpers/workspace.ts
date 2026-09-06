@@ -30,8 +30,18 @@ export async function openWorkspace(page: Page) {
   // App initialization and the asynchronous home-library refresh can overlap
   // on a cold browser preview. Retry the visible user route after it settles;
   // this keeps the test on the same public opening flow rather than reaching
-  // into the store or mock internals.
+  // into the store or mock internals. An open already in flight (the opening
+  // overlay) is waited out, never clicked on top of: a second open would
+  // replace the connection and tear down the workspace the first one built.
+  const opening = () => page.getByText("Opening project…");
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await opening().isVisible({ timeout: 1500 }).catch(() => false)) {
+      if (await passages.isVisible({ timeout: 30_000 }).catch(() => false)) {
+        await ensureCoderReady(page);
+        return;
+      }
+      continue;
+    }
     const workLocally = page.getByRole("button", { name: /Work locally/i });
     if (await workLocally.isVisible({ timeout: 1500 }).catch(() => false)) {
       await clickAndObserveWorkspace(workLocally);
@@ -42,6 +52,12 @@ export async function openWorkspace(page: Page) {
     }).first();
     if (await recent.isVisible({ timeout: 5000 }).catch(() => false)) {
       await clickAndObserveWorkspace(recent);
+    } else if (await opening().isVisible({ timeout: 1000 }).catch(() => false)) {
+      if (await passages.isVisible({ timeout: 30_000 }).catch(() => false)) {
+        await ensureCoderReady(page);
+        return;
+      }
+      continue;
     } else {
       const openBtn = page.getByRole("button", {
         name: /Open a folder|Open an existing study/i,

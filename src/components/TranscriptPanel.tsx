@@ -2,6 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useProjectStore } from "../store/project-store";
+import { useNoteDraftStore } from "../store/note-draft-store";
 import { useAppStore } from "../store/app-store";
 import { appConfirm } from "../store/confirm-store";
 import { formatTimestampDisplay } from "../lib/vtt-parser";
@@ -39,7 +40,8 @@ import { aliasPreview } from "../lib/speaker-alias";
 import { SelectionBubble, type BubbleAnchor } from "./SelectionBubble";
 import { SpeakerPickerPopover } from "./SpeakerPickerPopover";
 import { buildMarkMenuItems } from "./TranscriptPanel.menu";
-import { NoteEditor } from "./NoteEditor";
+import { NoteConflictModal } from "./NoteConflictModal";
+import { modKey } from "../lib/platform";
 import { THEME_GROUND, usePrefersDark } from "../hooks/useTheme";
 import { computeStripeLayout, type StripeLayoutResult } from "../lib/stripe-layout";
 import { Icon } from "./ui/Icon";
@@ -76,7 +78,6 @@ export function TranscriptPanel() {
     activeCoder,
     removeCodedSegment,
     showStatus,
-    saveMemoForCoding,
     openNoteForCoding,
     removeCodeFromCoding,
     clearMemoForCoding,
@@ -116,7 +117,6 @@ export function TranscriptPanel() {
       activeCoder: s.activeCoder,
       removeCodedSegment: s.removeCodedSegment,
       showStatus: s.showStatus,
-      saveMemoForCoding: s.saveMemoForCoding,
       openNoteForCoding: s.openNoteForCoding,
       removeCodeFromCoding: s.removeCodeFromCoding,
       clearMemoForCoding: s.clearMemoForCoding,
@@ -912,7 +912,7 @@ export function TranscriptPanel() {
                 }
                 aria-label={`Interview actions for ${activeInterview.participant_label}`}
                 title="Interview actions"
-                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[var(--ink-3)] transition-colors hover:bg-[var(--fill)] hover:text-[var(--ink)]"
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[var(--ink-2)] transition-colors hover:bg-[var(--fill)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
               >
                 <Icon name="dots" size={14} />
               </button>
@@ -1339,6 +1339,7 @@ export function TranscriptPanel() {
 
                       <PassageText
                         segmentId={seg.id}
+                        segmentIndex={seg.segment_index}
                         text={seg.text}
                         coded={segCodings}
                         activeCoder={activeCoder}
@@ -1353,7 +1354,6 @@ export function TranscriptPanel() {
                             ? { start: pendingSpan.start, end: pendingSpan.end }
                             : null
                         }
-                        saveMemoForCoding={saveMemoForCoding}
                         matches={matchesBySegment.get(seg.id) ?? EMPTY_MATCHES}
                         currentMatch={
                           activeMatch && activeMatch.segmentId === seg.id
@@ -1516,10 +1516,13 @@ export function TranscriptPanel() {
 }
 
 /**
- * PassageText with multi-code underlines (B2), mark context menu (A2), and NoteEditor integration (A7).
+ * PassageText with multi-code underlines (B2), mark context menu (A2), and
+ * the single inline note editor: every Add/Edit route selects the shared
+ * coding identity and the editor docks below its source passage.
  */
 const PassageText = memo(function PassageText({
   segmentId,
+  segmentIndex,
   text,
   coded,
   activeCoder,
@@ -1530,7 +1533,6 @@ const PassageText = memo(function PassageText({
   clearMemoForCoding,
   codesById,
   pending,
-  saveMemoForCoding,
   matches,
   currentMatch,
   onSelectCoding,
@@ -1540,6 +1542,7 @@ const PassageText = memo(function PassageText({
   isReviewed,
 }: {
   segmentId: string;
+  segmentIndex: number;
   text: string;
   coded: CodedSegment[];
   activeCoder: string;
@@ -1550,11 +1553,6 @@ const PassageText = memo(function PassageText({
   clearMemoForCoding: (codingId: string) => Promise<void>;
   codesById: Map<string, Code>;
   pending: { start: number; end: number } | null;
-  saveMemoForCoding: (
-    codedSegmentId: string,
-    memo: string,
-    options?: { silent?: boolean },
-  ) => Promise<CodedSegment>;
   matches: MatchRange[];
   currentMatch: MatchRange | null;
   onSelectCoding?: (coding: CodedSegment, codeId?: string) => void;
@@ -1567,18 +1565,31 @@ const PassageText = memo(function PassageText({
     () => highlightRuns(text, coded, codesById),
     [text, coded, codesById],
   );
-  const notes = useMemo(
-    () => coded.filter((coding) => coding.memo?.trim()),
-    [coded],
+  // Codings with a saved note, plus codings holding only an unfinished draft:
+  // the toggle must survive the collapse so the draft can be reopened.
+  // Subscribed as one stable string so keystrokes in the open editor do not
+  // re-render every passage on the screen.
+  const draftCodingIds = useNoteDraftStore((s) =>
+    Object.values(s.entries)
+      .filter((e) => e.kind === "coding")
+      .map((e) => e.targetId)
+      .sort()
+      .join(","),
   );
+  const draftIdSet = useMemo(() => new Set(draftCodingIds ? draftCodingIds.split(",") : []), [draftCodingIds]);
+  const notes = useMemo(
+    () => coded.filter((coding) => coding.memo?.trim() || draftIdSet.has(coding.id)),
+    [coded, draftIdSet],
+  );
+  const activeInlineCodingId = useNoteDraftStore((s) => s.activeInlineCodingId);
+  const closeNote = useProjectStore((s) => s.closeNote);
   const noteKey = notes
     .map(
       (coding) =>
-        `${coding.id}:${coding.memo}:${coding.char_start}:${coding.char_end}`,
+        `${coding.id}:${coding.memo}:${coding.char_start}:${coding.char_end}:${draftIdSet.has(coding.id) ? "draft" : ""}`,
     )
     .join("|");
   const textRootRef = useRef<HTMLDivElement>(null);
-  const [expandedNoteId, setExpandedNoteId] = useState<string | null>(null);
   const [noteTops, setNoteTops] = useState<Record<string, number>>({});
   const [hoveredStripeCodeId, setHoveredStripeCodeId] = useState<string | null>(null);
   const [stripeLayout, setStripeLayout] = useState<StripeLayoutResult | null>(null);
@@ -1598,15 +1609,15 @@ const PassageText = memo(function PassageText({
     setParagraphHeight(paragraph.offsetHeight);
 
     const base = paragraph.getBoundingClientRect().top;
-    const noteButtons = root.querySelectorAll<HTMLElement>(
-      'button[aria-label="Expand note"], button[aria-label="Collapse note"]',
-    );
+    // Toggles carry their coding id, so draft-only toggles interleaved with
+    // saved-note toggles cannot misalign an index-based mapping.
+    const noteButtons = root.querySelectorAll<HTMLElement>("button[data-note-toggle]");
     const tops: Record<string, number> = {};
-    noteButtons.forEach((btn, idx) => {
-      const coding = notes[idx];
-      if (!coding) return;
+    noteButtons.forEach((btn) => {
+      const id = btn.dataset.noteToggle;
+      if (!id) return;
       const r = btn.getBoundingClientRect();
-      tops[coding.id] = Math.max(0, r.top - base);
+      tops[id] = Math.max(0, r.top - base);
     });
     setNoteTops(tops);
 
@@ -1907,10 +1918,14 @@ const PassageText = memo(function PassageText({
         })}
       </p>
 
-      {/* Inline passage notes column */}
+      {/* Inline passage notes column. One shared editor identity: the toggle
+          collapses (retaining the draft) and reopens the same draft. A saved
+          note keeps its icon; a draft-only note gets a distinguishable dot. */}
       {notes.map((coding) => {
         const top = noteTops[coding.id] ?? 0;
-        const isExpanded = expandedNoteId === coding.id;
+        const isActive = activeInlineCodingId === coding.id;
+        const hasDraft = draftIdSet.has(coding.id);
+        const hasSaved = Boolean(coding.memo?.trim());
         return (
           <div
             key={coding.id}
@@ -1919,34 +1934,56 @@ const PassageText = memo(function PassageText({
           >
             <button
               type="button"
+              data-note-toggle={coding.id}
               onClick={(e) => {
                 e.stopPropagation();
-                setExpandedNoteId(isExpanded ? null : coding.id);
+                if (isActive) closeNote();
+                else {
+                  openNoteFor(coding.id);
+                  // Focus lands in the editor on mount (autoFocus); closing
+                  // returns focus here via data-note-toggle.
+                }
               }}
-              aria-expanded={isExpanded}
-              aria-label={isExpanded ? "Collapse note" : "Expand note"}
-              className="flex h-5 w-5 items-center justify-center rounded-full text-[var(--accent)] hover:bg-[var(--fill)]"
-              title={coding.memo ?? "Passage note"}
+              aria-expanded={isActive}
+              aria-label={
+                isActive
+                  ? "Collapse note"
+                  : hasSaved
+                    ? "Expand note"
+                    : "Expand unfinished note draft"
+              }
+              className="relative grid h-6 w-6 place-items-center rounded-full text-[var(--accent)] hover:bg-[var(--fill)]"
+              title={
+                hasSaved ? (coding.memo ?? "Passage note") : "Unfinished note draft"
+              }
             >
-              <Icon name="note" size={12} />
+              <Icon name="note" size={13} />
+              {!hasSaved && hasDraft ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+                />
+              ) : null}
             </button>
           </div>
         );
       })}
 
-      {/* Expanded note card docked below the passage text, never overlaying it */}
-      {expandedNoteId &&
+      {/* The one inline editor, docked below the passage text (before code
+          pills and the next passage), never overlaying prose. Hidden by
+          ordinary filtering along with its passage — the draft is retained
+          in the store and the editor restores when the passage returns. */}
+      {activeInlineCodingId &&
         (() => {
-          const expandedCoding = notes.find((c) => c.id === expandedNoteId);
-          if (!expandedCoding) return null;
+          const activeCoding = coded.find((c) => c.id === activeInlineCodingId);
+          if (!activeCoding) return null;
           return (
             <div className="pl-8 pr-7 pt-2">
-              <PassageNoteCard
-                coding={expandedCoding}
+              <InlineNoteEditor
+                coding={activeCoding}
                 passageText={text}
+                segmentIndex={segmentIndex}
                 codesById={codesById}
-                onClose={() => setExpandedNoteId(null)}
-                saveMemoForCoding={saveMemoForCoding}
               />
             </div>
           );
@@ -1955,23 +1992,38 @@ const PassageText = memo(function PassageText({
   );
 });
 
-function PassageNoteCard({
+/**
+ * The one inline passage-note editor, docked below its source passage.
+ *
+ * Every Add/Edit route (note toggle, coding menu, selection bubble) selects
+ * the shared coding identity and lands here. Explicit Save & close commits
+ * through revision CAS; Collapse, Escape, switching passage or interview and
+ * filtering all retain the unfinished draft without prompting, and reopening
+ * restores it. Explicit Discard confirms when dirty.
+ */
+function InlineNoteEditor({
   coding,
   passageText,
+  segmentIndex,
   codesById,
-  onClose,
-  saveMemoForCoding,
 }: {
   coding: CodedSegment;
   passageText: string;
+  segmentIndex: number;
   codesById: Map<string, Code>;
-  onClose: () => void;
-  saveMemoForCoding: (
-    codedSegmentId: string,
-    memo: string,
-    options?: { silent?: boolean },
-  ) => Promise<CodedSegment>;
 }) {
+  const workspace = useNoteDraftStore((s) => s.workspace);
+  const activeCoder = useProjectStore((s) => s.activeCoder);
+  const closeNote = useProjectStore((s) => s.closeNote);
+  const frozen = useNoteDraftStore((s) => s.frozen);
+  const entryKey =
+    workspace != null ? `${workspace.projectKey}::coding::${coding.id}` : null;
+  const entry = useNoteDraftStore((s) => (entryKey ? s.entries[entryKey] : undefined));
+  const [beginError, setBeginError] = useState<string | null>(null);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   const quote =
     coding.char_start != null && coding.char_end != null
       ? passageText.slice(coding.char_start, coding.char_end)
@@ -1980,41 +2032,296 @@ function PassageNoteCard({
     .map((id) => codesById.get(id))
     .filter((code): code is Code => !!code);
 
-  const title = (
-    <div className="flex flex-wrap gap-1">
-      {codeItems.map((code) => (
-        <span
-          key={code.id}
-          className="rounded-full px-1.5 py-0.5 text-[10px] font-medium text-white"
-          style={{ background: code.color }}
-        >
-          {code.name}
-        </span>
-      ))}
-    </div>
-  );
+  // Begin (or resume) the draft when the editor mounts for a target. A repeat
+  // call for the same identity focuses the existing draft without reseeding.
+  useEffect(() => {
+    if (!workspace) return;
+    setBeginError(null);
+    setConfirmingDiscard(false);
+    void useNoteDraftStore
+      .getState()
+      .beginDraft({
+        kind: "coding",
+        targetId: coding.id,
+        interviewId: coding.interview_id,
+        coderName: activeCoder || coding.coder_name,
+        participantLabel: coding.participant_label,
+        segmentId: coding.segment_id,
+        segmentIndex,
+        charStart: coding.char_start,
+        charEnd: coding.char_end,
+        quoteText: quote,
+      })
+      .catch((error: unknown) => {
+        setBeginError(error instanceof Error ? error.message : String(error));
+      });
+    // The identity IS the subscription: a new coding id re-begins, the same
+    // id refocuses. Committed text arrives through the store, not props.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coding.id, workspace?.projectKey, workspace?.epoch]);
 
-  const subtitle = quote ? (
-    <span className="line-clamp-2 block font-serif italic text-[11px] pt-0.5">
-      “{quote}”
-    </span>
-  ) : undefined;
+  if (!workspace) return null;
+
+  const dirty = entry != null && entry.draftText !== entry.baseText;
+  const conflicted = entry?.saveState === "conflict" && entry.conflictText !== null;
+  const missing =
+    entry?.targetMissing ||
+    (beginError !== null && /no longer available/i.test(beginError));
+  const saveFailed = entry?.saveState === "error" && !entry.targetMissing;
+  const backingUp =
+    entry != null &&
+    (entry.putInFlight || entry.queuedText !== null) &&
+    entry.recoveryState === "backing-up";
+  const backedUp =
+    entry != null &&
+    dirty &&
+    !entry.putInFlight &&
+    entry.queuedText === null &&
+    entry.recoveryState === "backed-up";
+  const recoveryFailed =
+    entry != null && (entry.recoveryState === "error" || entry.recoveryState === "unavailable");
+
+  const focusToggle = () => {
+    document
+      .querySelector<HTMLElement>(`button[data-note-toggle="${coding.id}"]`)
+      ?.focus();
+  };
+
+  const collapse = () => {
+    // Collapse retains the draft: no prompt, no discard. Reopening restores it.
+    setConfirmingDiscard(false);
+    closeNote();
+    focusToggle();
+  };
+
+  const saveAndClose = () => {
+    if (!entryKey || saving) return;
+    setSaving(true);
+    void useNoteDraftStore
+      .getState()
+      .saveDraft(entryKey)
+      .then((ok) => {
+        setSaving(false);
+        if (!ok) {
+          textareaRef.current?.focus();
+          return;
+        }
+        // Close only if that exact revision is still current: typing during
+        // the save keeps the editor open with the newer draft dirty.
+        const live = useNoteDraftStore.getState().entries[entryKey];
+        if (live && live.draftText === live.baseText) {
+          closeNote();
+          focusToggle();
+        } else {
+          textareaRef.current?.focus();
+        }
+      })
+      .catch(() => setSaving(false));
+  };
+
+  const discard = () => {
+    if (!entryKey) return;
+    void useNoteDraftStore
+      .getState()
+      .discardDraft(entryKey)
+      .then((ok) => {
+        if (ok) {
+          setConfirmingDiscard(false);
+          closeNote();
+          focusToggle();
+        }
+      });
+  };
 
   return (
     <div
-      className="note-card relative w-full max-w-lg p-3 shadow-xl z-10"
+      className="note-card relative w-full p-3 shadow-xl z-10"
       onClick={(event) => event.stopPropagation()}
     >
-      <NoteEditor
-        initialMemo={coding.memo ?? ""}
-        title={title}
-        subtitle={subtitle}
-        onSave={async (memo) => {
-          await saveMemoForCoding(coding.id, memo);
+      <div className="flex items-center justify-between pb-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium leading-tight">Passage {segmentIndex + 1}</div>
+          {codeItems.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {codeItems.map((code) => (
+                <span
+                  key={code.id}
+                  className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                  style={{ backgroundColor: code.color, color: textOnSolid(code.color) }}
+                >
+                  {code.name}
+                </span>
+              ))}
+            </div>
+          )}
+          {quote ? (
+            <span className="line-clamp-2 block pt-1 font-serif italic text-[12px] text-[var(--ink-3)]">
+              “{quote}”
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          {dirty && !conflicted ? (
+            <span className="text-[11px] font-medium text-[var(--accent)]" role="status">
+              Editing · unsaved
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={collapse}
+            aria-label="Close note editor"
+            className="grid h-6 w-6 place-items-center rounded-md text-[var(--ink-3)] transition-colors hover:bg-[var(--fill)] hover:text-[var(--ink)]"
+          >
+            <Icon name="close" size={12} />
+          </button>
+        </div>
+      </div>
+
+      {beginError && !missing ? (
+        <div
+          role="alert"
+          className="mb-2 rounded-md bg-[var(--danger,#b03a34)]/10 px-2.5 py-1.5 text-[11.5px] text-[var(--danger,#b03a34)]"
+        >
+          {beginError}
+        </div>
+      ) : null}
+      {missing ? (
+        <div
+          role="alert"
+          className="mb-2 rounded-md bg-[var(--danger,#b03a34)]/10 px-2.5 py-1.5 text-[11.5px] text-[var(--danger,#b03a34)]"
+        >
+          The original coding is no longer available. Your unfinished text is kept in
+          Unfinished notes — copy it before discarding.
+        </div>
+      ) : null}
+
+      <textarea
+        ref={textareaRef}
+        value={entry?.draftText ?? ""}
+        onChange={(e) => {
+          if (entryKey && !frozen) useNoteDraftStore.getState().editDraft(entryKey, e.target.value);
         }}
-        onClose={onClose}
+        onKeyDown={(e) => {
+          const mod = e.metaKey || e.ctrlKey;
+          if (mod && e.key === "Enter") {
+            e.preventDefault();
+            if (!frozen) saveAndClose();
+            return;
+          }
+          if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+            // Escape collapses and retains — it never discards.
+            e.preventDefault();
+            e.stopPropagation();
+            collapse();
+          }
+        }}
         autoFocus
+        placeholder="Why does this passage get this coding? Record your reasoning…"
+        aria-label="Note content"
+        disabled={entry == null || conflicted || frozen}
+        className="field w-full resize-none text-[13px] leading-relaxed p-2.5 min-h-[120px]"
       />
+
+      {conflicted && entryKey ? (
+        <div className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--fill)] p-2">
+          <span className="flex-1 text-[11.5px]">
+            This note changed elsewhere. Compare before saving — the comparison is
+            the editable surface meanwhile.
+          </span>
+          <NoteConflictModal entryKey={entryKey} triggerLabel="Compare" />
+        </div>
+      ) : null}
+
+      {saveFailed && entry ? (
+        <div
+          role="alert"
+          className="mt-2 rounded-md bg-[var(--danger,#b03a34)]/10 px-2.5 py-1.5 text-[11.5px] text-[var(--danger,#b03a34)]"
+        >
+          <span>Could not save note: {entry.saveError}</span>{" "}
+          <button
+            type="button"
+            className="link font-medium"
+            onClick={() => {
+              if (entryKey) void useNoteDraftStore.getState().saveDraft(entryKey);
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
+
+      <div className="mt-2 flex min-h-[18px] items-center gap-2 text-[11px] text-[var(--ink-3)]">
+        {backingUp ? (
+          <span role="status">Backing up draft…</span>
+        ) : backedUp ? (
+          <span role="status">Draft backed up locally</span>
+        ) : recoveryFailed && entry ? (
+          <>
+            <span role="alert">Draft not backed up — Retry</span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs"
+              onClick={() => useNoteDraftStore.getState().retryRecovery(entry.key)}
+            >
+              Retry
+            </button>
+          </>
+        ) : saving ? (
+          <span role="status">Saving…</span>
+        ) : null}
+      </div>
+
+      <div className="mt-2.5 pt-2 border-t border-[var(--g-rim)]/60">
+        {confirmingDiscard ? (
+          <div className="flex flex-col gap-2 rounded-lg bg-[var(--fill)] p-2">
+            <span className="text-[11.5px] font-medium text-[var(--danger,#b03a34)]">
+              Discard changes to this note?
+            </span>
+            <div className="flex items-center gap-1.5 justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmingDiscard(false);
+                  textareaRef.current?.focus();
+                }}
+                className="btn btn-ghost btn-xs"
+              >
+                Keep editing
+              </button>
+              <button type="button" onClick={discard} className="btn btn-danger btn-xs">
+                Discard
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-2">
+            <span className="hint text-[10.5px]">
+              {modKey}↵ to save · Esc to close
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  if (dirty) setConfirmingDiscard(true);
+                  else collapse();
+                }}
+                disabled={saving}
+                className="btn btn-ghost btn-sm text-[var(--danger,#b03a34)] hover:bg-[var(--danger,#b03a34)]/10"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                onClick={saveAndClose}
+                disabled={saving || !dirty || frozen}
+                className="btn btn-primary btn-sm"
+              >
+                {saving ? "Saving…" : "Save & close"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

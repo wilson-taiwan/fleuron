@@ -20,6 +20,7 @@ import { appConfirm } from "../store/confirm-store";
 import type { LeftStudy, MembershipSummary, RecentProject } from "../lib/types";
 import { Icon, type IconName } from "./ui/Icon";
 import { Modal } from "./ui/Surfaces";
+import { useUnfinishedNotesCount } from "./NoteRecoveryPanel";
 import { ContextMenuHost, openContextMenu } from "./ui/ContextMenu";
 import { AccountForm } from "./AccountForm";
 import { CollaborationDisclosure } from "./CollaborationDisclosure";
@@ -63,6 +64,8 @@ export function WelcomeScreen() {
   const signedInEmail = useSyncStore((s) => s.status?.signedInEmail);
   const refreshStatus = useSyncStore((s) => s.refreshStatus);
   const openGuide = useGuideStore((s) => s.openGuide);
+  const unfinishedCount = useUnfinishedNotesCount();
+  const setShowRecoveryPanel = useProjectStore((s) => s.setShowRecoveryPanel);
 
   const [recentError, setRecentError] = useState<string | null>(null);
   const [recents, setRecents] = useState<RecentProject[]>([]);
@@ -697,6 +700,17 @@ export function WelcomeScreen() {
                   <Icon name="people" size={13} />
                   Join with a key
                 </button>
+                {unfinishedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowRecoveryPanel(true)}
+                    disabled={loading}
+                    className="btn btn-outline btn-sm gap-1.5"
+                  >
+                    <Icon name="note" size={13} />
+                    Unfinished notes ({unfinishedCount})
+                  </button>
+                )}
               </div>
 
               {/* Individual Studies section */}

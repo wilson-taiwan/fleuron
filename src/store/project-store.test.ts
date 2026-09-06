@@ -57,6 +57,19 @@ vi.mock("../lib/api", () => ({
       selected_segment_id: null,
       active_coder: null,
     }),
+    // Note-draft checked-write contract (mirrors src/lib/api.ts). Most
+    // project-store tests run unbound, so these stay uncalled; they exist so
+    // bound flows degrade to explicit rejections instead of TypeErrors.
+    noteRecoveryStatus: vi.fn().mockResolvedValue({ available: true, error: null }),
+    listNoteDrafts: vi.fn().mockResolvedValue([]),
+    beginNoteDraft: vi.fn(),
+    putNoteDraft: vi.fn(),
+    discardNoteDraft: vi.fn(),
+    saveNoteDraft: vi.fn(),
+    resolveNoteDraftTarget: vi.fn(),
+    setRecoveryRootForSelftest: vi.fn().mockResolvedValue(undefined),
+    approveUpdateDeparture: vi.fn(),
+    completeNoteDeparture: vi.fn(),
   },
 }));
 
@@ -64,6 +77,7 @@ vi.mock("../lib/api", () => ({
 import { appConfirm } from "./confirm-store";
 import { api } from "../lib/api";
 import { useProjectStore } from "./project-store";
+import { useNoteDraftStore } from "./note-draft-store";
 import { computeInterviewCodedCount } from "../lib/store-helpers";
 import type { Code, CodedSegment, ProjectInfo } from "../lib/types";
 
@@ -95,6 +109,7 @@ function resetStore(overrides: Record<string, unknown> = {}) {
     noteEditorCodingId: null,
     hubMemo: "",
     savedHubMemo: "",
+    showRecoveryPanel: false,
     hubMemoDirty: false,
     toasts: [],
     // Baseline for most tests is "somebody has said who they are"; the
@@ -110,6 +125,7 @@ function resetStore(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   resetStore();
+  useNoteDraftStore.getState().clearWorkspace();
   vi.mocked(api.mutateCodingEdge).mockImplementation(async (input) => {
     const state = useProjectStore.getState();
     const charStart = input.char_start ?? null;
@@ -585,6 +601,9 @@ describe("opening and passage-note state", () => {
 
     vi.mocked(api.openProject).mockResolvedValueOnce(mockSnapshot as any);
     vi.mocked(api.getAppPreferences).mockResolvedValue({ coder_identities: {} } as never);
+    // Same-path reopen is a no-op once a study is open (it would only rotate
+    // the workspace epoch and strand drafts), so start closed here.
+    useProjectStore.setState({ project: null });
 
     await useProjectStore.getState().openProject(baseProject.path);
 

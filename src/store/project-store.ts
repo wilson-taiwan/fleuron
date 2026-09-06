@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { appConfirm } from "./confirm-store";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/api";
+import { useNoteDraftStore, isDraftDirty } from "./note-draft-store";
+import { useNoteDepartureStore } from "./note-departure-store";
 import { parseTranscriptFile } from "../hooks/useVttParser";
 import type { TranscriptFormat } from "../lib/transcript-parser";
 
@@ -45,20 +47,6 @@ let selectInterviewRequestToken = 0;
 function pushRecentCode(recentIds: string[], codeId: string): string[] {
   const filtered = recentIds.filter((id) => id !== codeId);
   return [codeId, ...filtered].slice(0, 6);
-}
-
-async function confirmHubMemoIfDirty(
-  hubMemoDirty: boolean,
-): Promise<boolean> {
-  if (!hubMemoDirty) return true;
-  return appConfirm({
-    title: "Unsaved hub memo",
-    body: "The interview analytic memo has unsaved changes. Continue without saving?",
-    confirmLabel: "Discard changes",
-    cancelLabel: "Go back",
-    destructive: true,
-    dedupeKey: "hub-memo-dirty",
-  });
 }
 
 async function rememberIdentity(path: string, coder: string) {
@@ -130,6 +118,8 @@ interface ProjectStore {
   showActivityLog: boolean;
   showProjectFiles: boolean;
   showBackups: boolean;
+  /** Local crash-recovery list. App-local: available with no study open. */
+  showRecoveryPanel: boolean;
   /**
    * The stretch of a passage the coder has selected, if any.
    *
@@ -182,6 +172,21 @@ interface ProjectStore {
   goForwardInterview: () => Promise<void>;
   showCloseConfirm: boolean;
   showResetConfirm: boolean;
+  /**
+   * Draft approval held across the unsent-sync confirmation: set by
+   * requestCloseProject after the departure controller approves, consumed
+   * (and cleared) by the close itself. Never set by any other path, so one
+   * departure's answer cannot approve a different action.
+   */
+  closeDraftApproved: boolean;
+  /**
+   * Native close/quit intent held while the unsent-sync confirmation is
+   * answered. Set after the draft preflight approves; the confirm dialog's
+   * answer completes it (approved replays the native action, cancel keeps
+   * everything open).
+   */
+  pendingNativeDeparture: { intentId: string; kind: "close" | "quit" } | null;
+  setPendingNativeDeparture: (intent: { intentId: string; kind: "close" | "quit" } | null) => void;
 
   setActiveCoder: (name: string) => void;
   setSelectedCodeIds: (ids: string[]) => void;
@@ -249,7 +254,7 @@ interface ProjectStore {
     coders: string[],
   ) => Promise<boolean>;
   seedCodes: (codes: { name: string; definition?: string }[]) => Promise<void>;
-  closeProject: () => Promise<void>;
+  closeProject: (opts?: { draftApproved?: boolean }) => Promise<void>;
   requestCloseProject: () => Promise<void>;
   refreshProject: () => Promise<void>;
   requestExportProject: () => Promise<void>;
@@ -303,6 +308,7 @@ interface ProjectStore {
   setShowActivityLog: (open: boolean) => void;
   setShowProjectFiles: (open: boolean) => void;
   setShowBackups: (open: boolean) => void;
+  setShowRecoveryPanel: (open: boolean) => void;
   setPendingSelection: (
     selection: {
       segmentId: string;
@@ -312,7 +318,7 @@ interface ProjectStore {
     } | null,
   ) => void;
   setCodeFilter: (codeId: string | null) => void;
-  restoreFromBackup: (backupPath: string) => Promise<RestoreOutcome>;
+  restoreFromBackup: (backupPath: string) => Promise<RestoreOutcome | null>;
   loadActivity: () => Promise<ActivityLogEntry[]>;
   dismissCloseConfirm: () => void;
   confirmCloseProject: () => Promise<void>;
@@ -471,6 +477,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   showActivityLog: false,
   showProjectFiles: false,
   showBackups: false,
+  showRecoveryPanel: false,
   pendingSelection: null,
   noteEditorCodingId: null,
   showInterviewMemo: false,
@@ -484,6 +491,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   historyCursor: -1,
   showCloseConfirm: false,
   showResetConfirm: false,
+  closeDraftApproved: false,
+  pendingNativeDeparture: null,
+  setPendingNativeDeparture: (intent) => set({ pendingNativeDeparture: intent }),
   showExportDialog: false,
   selectionIntent: "restore",
 
@@ -493,8 +503,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (path && name) rememberIdentity(path, name).catch(() => {});
     get().persistWorkspace().catch(() => {});
   },
-  openNoteForCoding: (codingId) => set({ noteEditorCodingId: codingId }),
-  closeNote: () => set({ noteEditorCodingId: null }),
+  openNoteForCoding: (codingId) => {
+    set({ noteEditorCodingId: codingId });
+    // One workspace-level coding identity: the project store owns it for
+    // existing callers, and the draft store mirrors it as the single active
+    // inline editor. Both writers go through these two functions.
+    useNoteDraftStore.getState().setActiveInline(codingId);
+  },
+  closeNote: () => {
+    set({ noteEditorCodingId: null });
+    useNoteDraftStore.getState().setActiveInline(null);
+  },
   setShowInterviewMemo: (open) => set({ showInterviewMemo: open }),
 
   setSelectedCodeIds: (ids) => set({ selectedCodeIds: ids }),
@@ -509,6 +528,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setHubMemo: (memo) => {
     const saved = get().savedHubMemo;
     set({ hubMemo: memo, hubMemoDirty: memo !== saved });
+    // Compatibility view: the draft store owns the interview entry when one
+    // is bound. Mirror keystrokes into it (no loop: editDraft never writes
+    // back into these fields).
+    const { activeInterviewId } = get();
+    const drafts = useNoteDraftStore.getState();
+    if (activeInterviewId && drafts.workspace) {
+      const entry = drafts.getEntry(drafts.workspace.projectKey, "interview", activeInterviewId);
+      if (entry && entry.draftText !== memo) {
+        drafts.editDraft(entry.key, memo);
+        const live = useNoteDraftStore.getState().entries[entry.key];
+        if (live) {
+          set({
+            hubMemo: live.draftText,
+            savedHubMemo: live.baseText,
+            hubMemoDirty: isDraftDirty(live),
+          });
+        }
+      }
+    }
   },
   /**
    * The coding row the codebook's ticks refer to right now.
@@ -734,6 +772,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   openProject: async (path) => {
+    // Double-clicking must not create duplicate operations: an open already
+    // in flight owns the transition; a second call waits its turn by
+    // returning to the caller, which already awaits the first.
+    if (get().loading) return;
+    // Reopening the study that is already open is a no-op: the connection is
+    // live and the epoch is valid, so swapping it would only strand drafts
+    // for no reason. A different path takes the guarded replacement below.
+    if (get().project?.path === path) return;
     set({
       loading: true,
       openingPath: path,
@@ -752,6 +798,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     try {
+      // Replacing the open study swaps the connection and rotates the
+      // workspace epoch: in-flight drafts would strand. Guard first.
+      if (get().project) {
+        const gate = await useNoteDepartureStore.getState().requestDeparture("open-study");
+        if (!gate.proceed) {
+          set({ loading: false, openingPath: null });
+          return;
+        }
+        // Consumed here: this flow closes through the approved flag below,
+        // and no leftover may approve a later, different action.
+        useNoteDepartureStore.getState().consumeCloseApproval();
+        // The approved departure owns this replacement; the close below
+        // must not re-prompt for the drafts it just settled.
+        await get().closeProject({ draftApproved: true });
+      }
       const snapshot = await api.openProject(path);
       get().hydrateOpenedSnapshot(snapshot);
     } catch (e) {
@@ -800,6 +861,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     for (const segId of snapshot.reviewed_segment_ids ?? []) {
       reviewedBySegment[segId] = true;
     }
+
+    // Bind the draft workspace to this open: checked writes carry the
+    // backend's project key + epoch from here on. Snapshots built before the
+    // recovery release (old unit fixtures) fall back to a path-scoped local
+    // identity so unbound sessions keep working without a backend.
+    const drafts = useNoteDraftStore.getState();
+    drafts.clearWorkspace();
+    drafts.bindWorkspace(
+      snapshot.project_key ?? `legacy-${project.path}`,
+      snapshot.workspace_epoch ?? `legacy-${Date.now()}`,
+    );
 
     set({
       project,
@@ -910,6 +982,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       (coding) => coding.id === current.noteEditorCodingId,
     );
 
+    // Adopt committed content into clean draft entries; dirty entries whose
+    // base moved become conflicts instead of being silently replaced. The
+    // live snapshot never marks a draft missing — absence from a loaded
+    // interview or an active filter is not deletion.
+    const liveDrafts = useNoteDraftStore.getState();
+    for (const coding of snapshot.coded_segments) {
+      liveDrafts.adoptSnapshotText("coding", coding.id, coding.memo ?? "");
+    }
+    for (const interview of snapshot.interviews) {
+      liveDrafts.adoptSnapshotText("interview", interview.id, interview.hub_memo ?? "");
+    }
+    // A rebind (new epoch after restore/reopen) re-resolves stranded entries.
+    if (
+      snapshot.workspace_epoch != null &&
+      liveDrafts.workspace != null &&
+      snapshot.workspace_epoch !== liveDrafts.workspace.epoch
+    ) {
+      liveDrafts.bindWorkspace(
+        snapshot.project_key ?? liveDrafts.workspace.projectKey,
+        snapshot.workspace_epoch,
+      );
+    }
+    const boundInterviewEntry =
+      liveDrafts.workspace != null && activeInterviewId != null
+        ? liveDrafts.getEntry(liveDrafts.workspace.projectKey, "interview", activeInterviewId)
+        : null;
+
     set({
       project: snapshot.project,
       interviews: snapshot.interviews,
@@ -929,11 +1028,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       syncConflicts: snapshot.conflicts,
       liveSyncStatus: snapshot.sync_status,
       localRevision: snapshot.local_revision,
-      ...(activeInterviewId !== current.activeInterviewId && !current.hubMemoDirty
+      ...(activeInterviewId !== current.activeInterviewId && !current.hubMemoDirty && !boundInterviewEntry
         ? {
             hubMemo: activeInterview?.hub_memo ?? "",
             savedHubMemo: activeInterview?.hub_memo ?? "",
             hubMemoDirty: false,
+          }
+        : {}),
+      ...(boundInterviewEntry
+        ? {
+            hubMemo: boundInterviewEntry.draftText,
+            savedHubMemo: boundInterviewEntry.baseText,
+            hubMemoDirty: isDraftDirty(boundInterviewEntry),
           }
         : {}),
     });
@@ -1011,8 +1117,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   dismissIdentityPrompt: () => set({ showIdentityPrompt: false }),
 
   createProject: async (parentDir, projectName, title, coders) => {
+    // Same duplicate-operation guard as openProject: creating twice would
+    // mint two studies and strand the first one's drafts.
+    if (get().loading) return false;
     set({ loading: true, openingPath: projectName, error: null });
     try {
+      // Creating while a study is open replaces the connection: guard first.
+      if (get().project) {
+        const gate = await useNoteDepartureStore.getState().requestDeparture("create-study");
+        if (!gate.proceed) {
+          set({ loading: false, openingPath: null });
+          return false;
+        }
+        useNoteDepartureStore.getState().consumeCloseApproval();
+        await get().closeProject({ draftApproved: true });
+      }
       const project = await api.createProject({
         parent_dir: parentDir,
         project_name: projectName,
@@ -1055,10 +1174,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   requestCloseProject: async () => {
-    const { hubMemoDirty, project } = get();
+    const { project } = get();
     if (!project) return;
-    const ok = await confirmHubMemoIfDirty(hubMemoDirty);
-    if (!ok) return;
+    // Draft approval first; the existing unsent-sync confirmation stays
+    // after it, and cancelling that later prompt keeps the study open.
+    const gate = await useNoteDepartureStore.getState().requestDeparture("close-study");
+    if (!gate.proceed) return;
+    // The approved departure owns this close: hold its approval across the
+    // sync confirmation so the close below cannot be mistaken for a bypass.
+    // Cancelling the sync prompt keeps the study open AND drops the approval.
+    const draftApproved = useNoteDepartureStore.getState().consumeCloseApproval();
 
     // Was: "you have not handed off this session". Handoff is gone, so the
     // question that still matters is whether this machine is holding coding
@@ -1067,19 +1192,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     try {
       const status = await api.syncStatus();
       if (status.signedIn && status.pendingChanges > 0) {
-        set({ showCloseConfirm: true });
+        set({ showCloseConfirm: true, closeDraftApproved: draftApproved });
         return;
       }
     } catch {
       // Sync not set up, or no project bound. Nothing outstanding to warn about.
     }
-    await get().closeProject();
+    await get().closeProject({ draftApproved });
   },
 
-  closeProject: async () => {
+  closeProject: async (opts) => {
+    // Anti-bypass: a close over unfinished drafts requires the approval the
+    // departure controller minted for it. Direct programmatic closes with no
+    // drafts (tests, selftest teardown) pass through untouched.
+    const drafts = useNoteDraftStore.getState();
+    const workspaceKey = drafts.workspace?.projectKey;
+    if (
+      !opts?.draftApproved &&
+      workspaceKey &&
+      drafts.dirtyEntries(workspaceKey).length > 0
+    ) {
+      throw new Error("Unfinished notes need review before closing.");
+    }
+    set({ closeDraftApproved: false });
     persistWorkspaceDebounced.cancel();
     await get().persistWorkspace();
     await api.closeProject();
+    useNoteDraftStore.getState().clearWorkspace();
     set({
       project: null,
       interviews: [],
@@ -1113,16 +1252,39 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
-  dismissCloseConfirm: () => set({ showCloseConfirm: false }),
+  dismissCloseConfirm: () => {
+    // Cancelling the sync confirmation keeps the study open — and answers a
+    // held native intent as cancelled, so the window/quit does not hang.
+    const pending = get().pendingNativeDeparture;
+    if (pending) {
+      void api.completeNoteDeparture(pending.intentId, false).catch(() => {});
+    }
+    set({ showCloseConfirm: false, closeDraftApproved: false, pendingNativeDeparture: null });
+  },
 
   confirmCloseProject: async () => {
-    set({ showCloseConfirm: false });
-    await get().closeProject();
+    const draftApproved = get().closeDraftApproved;
+    const pending = get().pendingNativeDeparture;
+    set({ showCloseConfirm: false, closeDraftApproved: false, pendingNativeDeparture: null });
+    if (pending) {
+      // A held native intent: for window close, settle the store first so
+      // state is clean when the backend replays the close; for quit the
+      // replayed exit runs backend cleanup itself.
+      if (pending.kind === "close") {
+        await get().closeProject({ draftApproved });
+      }
+      await api.completeNoteDeparture(pending.intentId, true).catch(() => {});
+      return;
+    }
+    await get().closeProject({ draftApproved });
   },
 
   requestResetWorkspace: async () => {
-    const ok = await confirmHubMemoIfDirty(get().hubMemoDirty);
-    if (!ok) return;
+    // Destructive while drafts may reference the rows: draft preflight
+    // first, then the existing reset confirmation. Orphan recovery survives.
+    const gate = await useNoteDepartureStore.getState().requestDeparture("reset");
+    if (!gate.proceed) return;
+    useNoteDepartureStore.getState().consumeCloseApproval();
     set({ showResetConfirm: true });
   },
 
@@ -1132,6 +1294,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({ showResetConfirm: false });
     const { activeInterviewId, activeCoder } = get();
     try {
+      // The departure preflight already settled dirty drafts and awaited
+      // pending writes; flush once more so no recovery put is in flight
+      // while the rows it describes are deleted.
+      await useNoteDraftStore.getState().flushPending();
       const result = await api.clearWorkspace({
         interview_id: opts.scope === "active" ? activeInterviewId : null,
         clear_hub_memos: opts.clearHubMemos,
@@ -1165,17 +1331,35 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setShowExportDialog: (open) => set({ showExportDialog: open }),
 
   requestExportProject: async () => {
-    const ok = await confirmHubMemoIfDirty(get().hubMemoDirty);
-    if (!ok) return;
+    // Export preflight: Save all and export / Export saved notes only /
+    // Cancel. No draft text enters output generation either way.
+    const gate = await useNoteDepartureStore.getState().requestDeparture("export");
+    if (!gate.proceed) return;
+    useNoteDepartureStore.getState().consumeCloseApproval();
+    if (gate.keptOrphanCount > 0 && gate.choice !== "saved-only") {
+      // Save-all path with orphans that cannot be committed: report, don't drop.
+      get().showStatus(
+        `${gate.keptOrphanCount} recovered draft${gate.keptOrphanCount === 1 ? " has" : "s have"} no coding and will remain in Unfinished notes; ${gate.keptOrphanCount === 1 ? "it is" : "they are"} excluded from this export.`,
+        "info",
+      );
+    }
     set({ showExportDialog: true });
   },
 
   exportWithConfig: async (targetDir: string, config: ExportConfig) => {
-    const { project, codes, interviews, codedSegments, activeCoder, syncConflicts } = get();
+    const { project, codes, activeCoder, syncConflicts } = get();
     if (!project) return null;
 
     set({ exporting: true });
     try {
+      // Committed-data export snapshot: reload notes for the export scope
+      // AFTER saves, from the database — never the UI's active-interview
+      // arrays (stale content) or uncommitted compat fields. One immutable
+      // snapshot feeds every output of this export.
+      const [committedInterviews, committedCoded] = await Promise.all([
+        api.listInterviews(),
+        api.listCodedSegments(),
+      ]);
       const exportedAt = new Date().toISOString();
       const needsHtml =
         config.items.includes("report-html") ||
@@ -1185,8 +1369,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             project,
             config,
             codes,
-            interviews,
-            codedSegments,
+            interviews: committedInterviews,
+            codedSegments: committedCoded,
             exportedBy: activeCoder,
             exportedAt,
             unresolvedConflictCount: syncConflicts.length,
@@ -1195,10 +1379,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
       const activeInterviews =
         config.includeParticipantScope === "selected" && config.selectedParticipantIds
-          ? interviews.filter((iv) => config.selectedParticipantIds?.includes(iv.id))
-          : interviews;
+          ? committedInterviews.filter((iv) => config.selectedParticipantIds?.includes(iv.id))
+          : committedInterviews;
 
-      let activeSegments = codedSegments.filter((cs) =>
+      let activeSegments = committedCoded.filter((cs) =>
         activeInterviews.some((iv) => iv.id === cs.interview_id),
       );
       if (config.includeCoderScope === "active-coder" && activeCoder) {
@@ -1245,6 +1429,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setShowProjectFiles: (open) => set({ showProjectFiles: open }),
 
   setShowBackups: (open) => set({ showBackups: open }),
+
+  setShowRecoveryPanel: (open) => set({ showRecoveryPanel: open }),
 
   setPendingSelection: (selection) => {
     // Selecting inside a passage also makes it the active one, so the right
@@ -1415,9 +1601,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   restoreFromBackup: async (backupPath) => {
     set({ loading: true, openingPath: backupPath, error: null });
     try {
+      // Destructive replacement: draft preflight first (orphan recovery
+      // survives in the separate recovery DB), then swap and re-resolve.
+      const gate = await useNoteDepartureStore.getState().requestDeparture("restore");
+      if (!gate.proceed) {
+        set({ loading: false, openingPath: null });
+        return null;
+      }
+      useNoteDepartureStore.getState().consumeCloseApproval();
       const outcome = await api.restoreBackup(backupPath);
       const project = await api.getProjectInfo();
-      await get().openProject(project.path);
+      // openProject reopens the same path: skip its replacement guard (the
+      // restore preflight above already settled drafts) by hydrating
+      // directly from a fresh snapshot.
+      const snapshot = await api.openProject(project.path);
+      get().hydrateOpenedSnapshot(snapshot);
       get().showStatus("Project restored from backup.");
       return outcome;
     } catch (e) {
@@ -1940,6 +2138,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
 
     const hub = interview?.hub_memo ?? "";
+    // Compatibility view follows the bound interview entry when one exists;
+    // navigation never rebinds an old draft to the newly selected interview
+    // (the entry key carries its own interview id).
+    const drafts = useNoteDraftStore.getState();
+    const boundEntry =
+      drafts.workspace != null
+        ? drafts.getEntry(drafts.workspace.projectKey, "interview", id)
+        : null;
     set({
       activeInterviewId: id,
       segments,
@@ -1954,9 +2160,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       filterMatchMode: "any",
       speakerFilter: null,
       transcriptSearch: "",
-      hubMemo: hub,
-      savedHubMemo: hub,
-      hubMemoDirty: false,
+      hubMemo: boundEntry ? boundEntry.draftText : hub,
+      savedHubMemo: boundEntry ? boundEntry.baseText : hub,
+      hubMemoDirty: boundEntry ? isDraftDirty(boundEntry) : false,
       selectedSegmentId,
       selectedCodeIds,
       selectionIntent: options?.persist === false ? "restore" : "jump",
@@ -2060,6 +2266,35 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   saveHubMemo: async (options) => {
     const { activeInterviewId, hubMemo } = get();
     if (!activeInterviewId) return;
+    // Preferred route: the bound interview draft entry owns save truth
+    // (revision CAS, truthful Saved). The legacy direct write below stays
+    // for callers with no bound entry (tests, unbound sessions).
+    const drafts = useNoteDraftStore.getState();
+    const entry = drafts.workspace
+      ? drafts.getEntry(drafts.workspace.projectKey, "interview", activeInterviewId)
+      : null;
+    if (entry) {
+      const ok = await drafts.saveDraft(entry.key);
+      const live = useNoteDraftStore.getState().entries[entry.key];
+      if (live) {
+        set({
+          hubMemo: live.draftText,
+          savedHubMemo: live.baseText,
+          hubMemoDirty: isDraftDirty(live),
+        });
+      }
+      if (ok) {
+        if (!options?.silent) {
+          get().showStatus("Hub memo saved for this interview.");
+        }
+      } else {
+        // The sticky inline state lives in the entry (with Retry); the toast
+        // is the one audible notice per failed attempt, not a retry loop.
+        const reason = live?.saveError ?? "Could not save the memo.";
+        get().showStatus(reason, "error");
+      }
+      return;
+    }
     // ⚠️ This had no catch. That was survivable while the only caller was a
     // button the user had just pressed; autosave calls it unattended, where an
     // unhandled rejection is a memo silently not saved under a panel that says

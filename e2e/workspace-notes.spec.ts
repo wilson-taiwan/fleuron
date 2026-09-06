@@ -1,36 +1,47 @@
 import { test, expect } from "@playwright/test";
 import { gotoApp, openWorkspace, selectFirstPassage } from "./helpers/workspace";
 
-test.describe("Workspace Notes and Memo Panel", () => {
+/**
+ * The editing side rail is gone: every Add/Edit route converges on the one
+ * inline passage-note editor docked below its source passage.
+ */
+test.describe("Workspace Notes inline editor", () => {
   test.beforeEach(async ({ page }) => {
     await gotoApp(page);
     await openWorkspace(page);
   });
 
-  test("closing memo rail with an existing note keeps it closed", async ({ page }) => {
-    // Select passage 3 (seg-2) which has coding in mock
+  test("no editing rail exists; closing the inline editor keeps it closed", async ({ page }) => {
+    await expect(page.locator('[data-testid="memo-panel"]')).toHaveCount(0);
+
     const passage = page.locator("article").nth(2);
     await passage.click();
 
-    // Open note via selection bubble or context menu if available
     const noteBtn = page.getByRole("button", { name: /Edit note|Add a note/i });
     if (await noteBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       await noteBtn.click();
-      const memoPanel = page.locator('[data-testid="memo-panel"]');
-      await expect(memoPanel).toBeVisible();
+      const box = page.getByRole("textbox", { name: "Note content" });
+      await expect(box).toBeVisible();
 
-      // Close note editor
-      const closeBtn = page.getByRole("button", { name: "Close note editor" });
-      await closeBtn.click();
-      await expect(memoPanel).not.toBeVisible();
+      // Collapse via Escape: retained, not discarded, rail never appears.
+      await page.keyboard.press("Escape");
+      await expect(box).toBeHidden();
+      await expect(page.locator('[data-testid="memo-panel"]')).toHaveCount(0);
 
-      // Navigating or clicking passages must NOT reopen the rail automatically
+      // Navigating passages must NOT reopen the editor automatically.
       await selectFirstPassage(page);
       await page.waitForTimeout(200);
-      await expect(memoPanel).not.toBeVisible();
+      await expect(box).toBeHidden();
+      await expect(page.locator('[data-testid="memo-panel"]')).toHaveCount(0);
     }
   });
 
+  test("exactly one Notifications host, mounted only while notices exist", async ({ page }) => {
+    // App.tsx owns the single ToastStack; the workspace mounts none. With no
+    // notices raised there is no region at all — one failure raises exactly
+    // one region with one announcement (see note-draft-lifecycle.spec.ts).
+    await expect(page.getByRole("region", { name: "Notifications" })).toHaveCount(0);
+  });
 });
 
 test.describe("Workspace stress fixture", () => {

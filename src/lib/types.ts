@@ -578,6 +578,10 @@ export interface ProjectOpenSnapshot {
   recent_code_ids: string[];
   reviewed_segment_ids: string[];
   diagnostics: ProjectOpenDiagnostics;
+  /** Local-study UUID this open is bound to (recovery scope). Additive. */
+  project_key?: string | null;
+  /** Backend workspace epoch for checked note writes. Additive. */
+  workspace_epoch?: string | null;
 }
 
 export interface SyncConflictSummary {
@@ -626,6 +630,10 @@ export interface LiveWorkspaceSnapshot {
   sync_status: LiveWorkspaceSyncStatus;
   local_revision: number;
   reviewed_segment_ids: string[];
+  /** Local-study UUID this open is bound to (recovery scope). Additive. */
+  project_key?: string | null;
+  /** Current backend workspace epoch for checked note writes. Additive. */
+  workspace_epoch?: string | null;
 }
 
 export type JoinTargetVerdict =
@@ -658,4 +666,142 @@ export interface LeftStudy {
   groupKey: string;
   coderName: string;
   leftAt: string;
+}
+
+// ── Note drafts: local crash recovery + checked writes ──────────────────────
+//
+// Recovery drafts stay on this computer. They are not committed notes, never
+// sync, and never enter exports or study backups. Mirrors the Rust DTOs in
+// src-tauri/src/models.rs (snake_case wire format).
+
+export type NoteDraftKind = "coding" | "interview";
+
+/** One unfinished note generation in app-local recovery. */
+export interface NoteDraftRecord {
+  draft_id: string;
+  project_key: string;
+  kind: string;
+  target_id: string;
+  interview_id: string;
+  coder_name: string | null;
+  base_text: string;
+  draft_text: string;
+  revision: number;
+  participant_label: string;
+  segment_id: string | null;
+  segment_index: number | null;
+  char_start: number | null;
+  char_end: number | null;
+  quote_text: string | null;
+  updated_at: string;
+  discarded: boolean;
+  /** Study title at list time (JOINed). Absent on single-record reads. */
+  project_title?: string | null;
+}
+
+export interface BeginNoteDraftInput {
+  project_key: string;
+  epoch: string;
+  kind: NoteDraftKind;
+  target_id: string;
+  interview_id: string;
+  coder_name?: string | null;
+  participant_label: string;
+  segment_id?: string | null;
+  segment_index?: number | null;
+  char_start?: number | null;
+  char_end?: number | null;
+  quote_text?: string | null;
+}
+
+export type BeginNoteDraftResult =
+  | { status: "active"; record: NoteDraftRecord; committed_text: string }
+  | { status: "missing-target" }
+  | { status: "stale-workspace" };
+
+export interface PutNoteDraftInput {
+  project_key: string;
+  epoch: string;
+  draft_id: string;
+  expected_revision: number;
+  draft_text: string;
+}
+
+export type PutNoteDraftResult =
+  | { status: "stored"; record: NoteDraftRecord }
+  | { status: "revision-mismatch"; record: NoteDraftRecord }
+  | { status: "stale-generation" }
+  | { status: "stale-workspace" };
+
+export interface DiscardNoteDraftInput {
+  draft_id: string;
+}
+
+export interface DiscardNoteDraftResult {
+  draft_id: string;
+  revision: number;
+}
+
+export interface SaveNoteDraftInput {
+  project_key: string;
+  epoch: string;
+  draft_id: string;
+  revision: number;
+  kind: NoteDraftKind;
+  target_id: string;
+  expected_saved_text: string;
+  draft_text: string;
+}
+
+/** Typed commit outcome. IO failures reject; content outcomes resolve. */
+export type SaveNoteDraftResult =
+  | {
+      status: "saved";
+      draft_id: string;
+      revision: number;
+      committed_text: string;
+      recovery_cleared: boolean;
+    }
+  | { status: "conflict"; current_text: string }
+  | { status: "missing-target" }
+  | { status: "stale-workspace" }
+  | { status: "stale-generation" };
+
+export type ResolveNoteDraftTargetResult =
+  | {
+      status: "live-coding";
+      draft_id: string;
+      interview_id: string;
+      participant_label: string;
+      committed_text: string;
+    }
+  | {
+      status: "live-interview";
+      draft_id: string;
+      participant_label: string;
+      committed_text: string;
+    }
+  | { status: "missing"; draft_id: string; reason: string };
+
+export interface UpdateDepartureApproval {
+  token: string;
+  project_key: string | null;
+  epoch: string | null;
+  draft_write_seq: number;
+}
+
+export interface DepartureCompletion {
+  intent_id: string;
+  replayed: string;
+}
+
+export interface RecoveryStatus {
+  available: boolean;
+  error: string | null;
+}
+
+/** Native close/quit intent held for the frontend draft preflight. */
+export interface NativeDepartureRequest {
+  intent_id: string;
+  kind: "close" | "quit";
 }

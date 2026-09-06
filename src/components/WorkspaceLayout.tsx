@@ -6,10 +6,8 @@ import { Icon } from "./ui/Icon";
 import { Tooltip } from "./ui/Tooltip";
 import { CodebookPanel } from "./CodebookPanel";
 import { TranscriptPanel } from "./TranscriptPanel";
-import { MemoPanel } from "./MemoPanel";
 import { InterviewMemoPanel } from "./InterviewMemoPanel";
 import { Toolbar } from "./Toolbar";
-import { ToastStack } from "./ToastStack";
 import { NextStepCoach } from "./NextStepCoach";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { BackupsPanel } from "./BackupsPanel";
@@ -20,10 +18,8 @@ import { ExportDialog } from "./ExportDialog";
 import { ContextMenuHost } from "./ui/ContextMenu";
 
 const DEFAULT_CODEBOOK = 248;
-const DEFAULT_MEMOS = 300;
 const MIN_PANEL = 190;
 const MAX_CODEBOOK = 400;
-const MAX_MEMOS = 480;
 const RESIZER = 5;
 
 /**
@@ -45,58 +41,54 @@ const COLLAPSED_RAIL = 24;
 /**
  * Grid columns for the workspace rails (T04).
  *
- * Collapsed, the codebook and its resizer are replaced by one slim expand
- * rail; the stored codebook width is untouched so expanding restores it.
- * Exported for test: collapsing must give the width to the transcript, never
- * to the memo rail, and must survive the memo rail being open.
+ * There is exactly one rail now: the codebook. Passage notes edit inline
+ * beneath their source passage (one active editor, drafts retained), so the
+ * memo rail and its reservation are gone. Collapsed, the codebook and its
+ * resizer are replaced by one slim expand rail; the stored codebook width is
+ * untouched so expanding restores it. Exported for test: collapsing must
+ * give the width to the transcript.
  */
 export function workspaceColumns(opts: {
   collapsed: boolean;
-  memoRail: boolean;
   codebook: number;
-  memos: number;
 }): string {
   if (opts.collapsed) {
-    return opts.memoRail
-      ? `${COLLAPSED_RAIL}px minmax(0, 1fr) ${RESIZER}px ${opts.memos}px`
-      : `${COLLAPSED_RAIL}px minmax(0, 1fr)`;
+    return `${COLLAPSED_RAIL}px minmax(0, 1fr)`;
   }
-  return opts.memoRail
-    ? `${opts.codebook}px ${RESIZER}px minmax(0, 1fr) ${RESIZER}px ${opts.memos}px`
-    : `${opts.codebook}px ${RESIZER}px minmax(0, 1fr)`;
+  return `${opts.codebook}px ${RESIZER}px minmax(0, 1fr)`;
 }
 
 /**
- * Shrink the rails toward `MIN_PANEL` when the window cannot hold both them and
- * a readable transcript, taking from each in proportion to how much slack it
- * has. Returns the widths to *render* — the stored preference is untouched, so
- * widening the window restores exactly what the user chose.
+ * Shrink the codebook toward `MIN_PANEL` when the window cannot hold both it
+ * and a readable transcript. Returns the width to *render* — the stored
+ * preference is untouched, so widening the window restores exactly what the
+ * user chose.
  *
- * Exported for test: this is the one piece of the layout with arithmetic in it,
- * and the failure it guards against (the transcript silently squeezed below a
- * readable measure) is invisible until someone tries to read at 1024.
+ * Exported for test: this is the one piece of the layout with arithmetic in
+ * it, and the failure it guards against (the transcript silently squeezed
+ * below a readable measure) is invisible until someone tries to read at 1024.
+ *
+ * The old `memos` preference is accepted and ignored for compatibility: it
+ * stays in stored preferences (no migration that could destroy layout
+ * settings) but no longer reserves space.
  */
 export function fitRails(
   codebook: number,
-  memos: number,
+  _memosIgnored: number,
   viewport: number,
 ): { codebook: number; memos: number } {
-  const overflow = codebook + memos + 2 * RESIZER + TRANSCRIPT_MIN - viewport;
-  if (overflow <= 0) return { codebook, memos };
+  void _memosIgnored;
+  const overflow = codebook + RESIZER + TRANSCRIPT_MIN - viewport;
+  if (overflow <= 0) return { codebook, memos: 0 };
 
-  const slackCodebook = Math.max(0, codebook - MIN_PANEL);
-  const slackMemos = Math.max(0, memos - MIN_PANEL);
-  const slack = slackCodebook + slackMemos;
-  // Both rails already at their floor: the window is narrower than the app
-  // claims to support, and the transcript takes what is left rather than
-  // pushing a control off-screen.
-  if (slack === 0) return { codebook, memos };
+  const slack = Math.max(0, codebook - MIN_PANEL);
+  // Already at the floor: the window is narrower than the app claims to
+  // support, and the transcript takes what is left rather than pushing a
+  // control off-screen.
+  if (slack === 0) return { codebook, memos: 0 };
 
   const take = Math.min(overflow, slack);
-  return {
-    codebook: Math.round(codebook - (take * slackCodebook) / slack),
-    memos: Math.round(memos - (take * slackMemos) / slack),
-  };
+  return { codebook: Math.round(codebook - take), memos: 0 };
 }
 
 /**
@@ -133,67 +125,57 @@ export function WorkspaceLayout() {
   const codebookCollapsed =
     useAppStore((s) => s.preferences.codebook_collapsed) ?? false;
   const setCodebookCollapsed = useAppStore((s) => s.setCodebookCollapsed);
+  const showExportDialog = useProjectStore((s) => s.showExportDialog);
+  const setShowExportDialog = useProjectStore((s) => s.setShowExportDialog);
   const [codebookWidth, setCodebookWidth] = useState(
     panelWidths?.codebook ?? DEFAULT_CODEBOOK,
   );
-  const [memosWidth, setMemosWidth] = useState(panelWidths?.memos ?? DEFAULT_MEMOS);
-  const noteEditorCodingId = useProjectStore((s) => s.noteEditorCodingId);
-  const showExportDialog = useProjectStore((s) => s.showExportDialog);
-  const setShowExportDialog = useProjectStore((s) => s.setShowExportDialog);
-  const showMemoRail = Boolean(noteEditorCodingId);
+  // The stored memos width is accepted and ignored: it stays in preferences
+  // for compatibility, but no memo rail reserves space anymore.
 
   const gridRef = useRef<HTMLDivElement>(null);
   const gridWidth = useElementWidth(gridRef);
   const rails = fitRails(
     codebookWidth,
-    showMemoRail ? memosWidth : 0,
+    panelWidths?.memos ?? 0,
     gridWidth,
   );
-  const dragging = useRef<"codebook" | "memos" | null>(null);
+  const dragging = useRef<"codebook" | null>(null);
   const gridWidthRef = useRef(gridWidth);
   gridWidthRef.current = gridWidth;
-  const widthsRef = useRef({ codebook: codebookWidth, memos: memosWidth });
+  const widthsRef = useRef({ codebook: codebookWidth });
 
   useEffect(() => {
-    widthsRef.current = { codebook: codebookWidth, memos: memosWidth };
-  }, [codebookWidth, memosWidth]);
+    widthsRef.current = { codebook: codebookWidth };
+  }, [codebookWidth]);
 
   useEffect(() => {
     if (panelWidths) {
       setCodebookWidth(panelWidths.codebook);
-      setMemosWidth(panelWidths.memos);
     }
   }, [panelWidths]);
 
   const onMouseMove = useCallback((e: MouseEvent) => {
     // The drag stops where the transcript would drop below TRANSCRIPT_MIN, so
-    // a rail can never be dragged into clipping the reading column. Without
+    // the rail can never be dragged into clipping the reading column. Without
     // this the stored width and the rendered width disagree and the panel
     // simply stops following the cursor, which reads as a broken drag.
-    const room = (other: number) =>
-      gridWidthRef.current - other - 2 * RESIZER - TRANSCRIPT_MIN;
-
     if (dragging.current === "codebook") {
-      const max = Math.min(MAX_CODEBOOK, room(widthsRef.current.memos));
+      const room = gridWidthRef.current - RESIZER - TRANSCRIPT_MIN;
+      const max = Math.min(MAX_CODEBOOK, room);
       const w = Math.min(Math.max(MIN_PANEL, max), Math.max(MIN_PANEL, e.clientX));
       setCodebookWidth(w);
       widthsRef.current.codebook = w;
-    }
-    if (dragging.current === "memos") {
-      const max = Math.min(MAX_MEMOS, room(widthsRef.current.codebook));
-      const w = Math.min(
-        Math.max(MIN_PANEL, max),
-        Math.max(MIN_PANEL, gridWidthRef.current - e.clientX),
-      );
-      setMemosWidth(w);
-      widthsRef.current.memos = w;
     }
   }, []);
 
   const onMouseUp = useCallback(() => {
     if (dragging.current) {
-      const { codebook, memos } = widthsRef.current;
-      setPanelWidths(codebook, memos);
+      // Preserve the stored memos width untouched: dropping it here would
+      // destroy a layout setting through a no-op migration.
+      const { codebook } = widthsRef.current;
+      const memos = useAppStore.getState().preferences.panel_widths?.memos;
+      void setPanelWidths(codebook, memos ?? 0);
       dragging.current = null;
     }
   }, [setPanelWidths]);
@@ -247,18 +229,15 @@ export function WorkspaceLayout() {
           {
             gridTemplateColumns: workspaceColumns({
               collapsed: codebookCollapsed,
-              memoRail: showMemoRail,
               codebook: rails.codebook,
-              memos: rails.memos,
             }),
             gridTemplateRows: "minmax(0, 1fr)",
             // Published so NextStepCoach can sit over the transcript column
-            // alone. It used to be `inset-x-0` across the whole grid, which
-            // ran it under the memo rail and covered "Already on this passage".
+            // alone.
             "--rail-l": codebookCollapsed
               ? `${COLLAPSED_RAIL}px`
               : `${rails.codebook + RESIZER}px`,
-            "--rail-r": showMemoRail ? `${rails.memos + RESIZER}px` : "0px",
+            "--rail-r": "0px",
           } as React.CSSProperties
         }
       >
@@ -306,12 +285,6 @@ export function WorkspaceLayout() {
           </>
         )}
         <TranscriptPanel />
-        {showMemoRail && (
-          <>
-            <Resizer onGrab={() => (dragging.current = "memos")} />
-            <MemoPanel />
-          </>
-        )}
         <NextStepCoach />
       </div>
 
@@ -319,7 +292,8 @@ export function WorkspaceLayout() {
           shortcuts the coach, the guide, and the context menus already teach
           at the moment they matter; chrome that never changes is chrome that
           stops being read. */}
-      <ToastStack />
+      {/* No ToastStack here: App.tsx owns the single Notifications region.
+          A second host double-announced every failure. */}
       <CloseProjectModal />
       <ResetWorkspaceModal />
       <ExportDialog

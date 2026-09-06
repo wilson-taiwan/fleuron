@@ -24,6 +24,43 @@ fn schedule_committed_shared_mutation(app: tauri::AppHandle, state: &AppState) {
 pub struct AppState {
     pub project_path: Mutex<Option<PathBuf>>,
     pub db: Mutex<Option<Connection>>,
+    /// Local-study UUID bound to the backend-resolved canonical project
+    /// folder path (NOT a Supabase group id). Recovery drafts are scoped to
+    /// it; clones at different paths stay separate.
+    pub project_key: Mutex<Option<String>>,
+    /// Workspace epoch, rotated on every open/replacement. Checked note
+    /// writes carry it; a write from a superseded connection fails closed
+    /// instead of landing in the wrong database.
+    pub workspace_epoch: Mutex<Option<String>>,
+    /// Serializes workspace replacement (open, close, restore, updater
+    /// connection swap) against checked note writes. Lock order everywhere:
+    /// `workspace_transition → project_path → db → recovery_db`. Checking an
+    /// epoch under any other lock is not sufficient, because the replacement
+    /// paths swap the connection this guard protects.
+    pub(crate) workspace_transition: Mutex<()>,
+    /// App-local recovery database (`note-recovery.sqlite3`). Separate from
+    /// every project folder, so unfinished text never rides along in a cloud
+    /// copy, backup ZIP, export or sync payload.
+    pub(crate) recovery_db: Mutex<Option<Connection>>,
+    /// Set once the recovery database fails to open or write: editing
+    /// continues in memory with a persistent warning, never a crash and never
+    /// silent loss of the recovery promise.
+    pub(crate) recovery_unavailable: AtomicBool,
+    pub(crate) recovery_error: Mutex<Option<String>>,
+    /// Selftest-only injection: a temporary recovery root so the suites never
+    /// touch (or clear) real recovery records. Refused outside selftest mode.
+    pub(crate) recovery_path_override: Mutex<Option<PathBuf>>,
+    /// Bumped on every acknowledged recovery write and every checked commit.
+    /// Update-install approvals bind to it, so an edit landing between
+    /// approval and install invalidates the approval.
+    pub(crate) draft_write_seq: std::sync::atomic::AtomicU64,
+    /// Native close/quit intent waiting on the frontend preflight (one-shot).
+    pub(crate) pending_departure: Mutex<Option<PendingDeparture>>,
+    /// One-use approval consumed when replaying an approved native action,
+    /// so the replay does not prompt recursively.
+    pub(crate) departure_approved: Mutex<Option<String>>,
+    /// One-use updater approval minted after the draft preflight.
+    pub(crate) update_departure_approval: Mutex<Option<StoredUpdateApproval>>,
     /// The live sync session for this run of the app.
     ///
     /// The access token exists only here and dies with the process. The
@@ -94,11 +131,43 @@ impl PendingOpen {
     }
 }
 
+/// A native close/quit event held for the frontend draft preflight.
+///
+/// The OS asked once; the frontend answers once. The intent survives until it
+/// is approved or cancelled — a timeout auto-approving it would discard drafts
+/// the user never saw, and a timeout auto-cancelling it would swallow quits.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDeparture {
+    pub(crate) intent_id: String,
+    pub(crate) kind: String,
+}
+
+/// A minted update-install approval: one use, tied to the workspace epoch
+/// and the draft-write sequence observed when the preflight passed.
+#[derive(Debug, Clone)]
+pub(crate) struct StoredUpdateApproval {
+    pub(crate) token: String,
+    pub(crate) project_key: Option<String>,
+    pub(crate) epoch: Option<String>,
+    pub(crate) draft_write_seq: u64,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
             project_path: Mutex::new(None),
             db: Mutex::new(None),
+            project_key: Mutex::new(None),
+            workspace_epoch: Mutex::new(None),
+            workspace_transition: Mutex::new(()),
+            recovery_db: Mutex::new(None),
+            recovery_unavailable: AtomicBool::new(false),
+            recovery_error: Mutex::new(None),
+            recovery_path_override: Mutex::new(None),
+            draft_write_seq: std::sync::atomic::AtomicU64::new(0),
+            pending_departure: Mutex::new(None),
+            departure_approved: Mutex::new(None),
+            update_departure_approval: Mutex::new(None),
             sync_session: Mutex::new(None),
             realtime: crate::realtime::RealtimeManager::new(),
             sync_coordinator: crate::sync_coordinator::SyncCoordinator::new(),
@@ -178,6 +247,13 @@ impl AppState {
     }
 
     pub(crate) fn close_project_connection_for_update(&self) -> Result<Option<PathBuf>, String> {
+        // Updater connection replacement: under the transition lock, so a
+        // checked note write cannot validate its epoch against a connection
+        // that is being pulled out from under it.
+        let _transition = self
+            .workspace_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         let project_path = self.project_path.lock().map_err(|e| e.to_string())?.clone();
         let mut db_guard = self.db.lock().map_err(|e| e.to_string())?;
         if let Some(conn) = db_guard.as_ref() {
@@ -188,6 +264,14 @@ impl AppState {
     }
 
     pub(crate) fn reopen_project_connection_after_update_failure(&self) -> Result<(), String> {
+        // Same lock as the teardown above: the reopen is part of the same
+        // replacement. The epoch is deliberately NOT rotated — the same
+        // database file is back, so in-flight drafts are still addressed
+        // correctly and CAS still guards their content.
+        let _transition = self
+            .workspace_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         let project_path = self
             .project_path
             .lock()
@@ -236,6 +320,14 @@ impl AppState {
             .clone()
             .ok_or("No project is open")?;
         self.checkpoint_open_project();
+        // Replacement under the transition lock (see
+        // close_project_connection_for_update). No epoch rotation: the repair
+        // restores the same study, and CAS on note content still guards
+        // in-flight drafts against the swapped rows.
+        let _transition = self
+            .workspace_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         *self.db.lock().map_err(|error| error.to_string())? = None;
         let restored = backup::restore(&project_path, backup_path);
         let reopened =
@@ -253,6 +345,211 @@ impl AppState {
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| "No project is open".into())
     }
+
+    // ── Workspace epoch + recovery ──────────────────────────────────────────
+
+    /// Current workspace identity (project key + epoch), cloned under lock.
+    pub(crate) fn current_workspace(&self) -> (Option<String>, Option<String>) {
+        let key = self.project_key.lock().ok().and_then(|g| g.clone());
+        let epoch = self.workspace_epoch.lock().ok().and_then(|g| g.clone());
+        (key, epoch)
+    }
+
+    /// Validate a checked-write credential pair. Must be called with the
+    /// workspace-transition lock held (the caller holds it for the whole
+    /// checked operation), so a replacement path cannot swap the connection
+    /// between this check and the write it guards.
+    pub(crate) fn check_workspace_under_transition(
+        &self,
+        project_key: &str,
+        epoch: &str,
+    ) -> Result<(), String> {
+        let (key, current_epoch) = self.current_workspace();
+        match (key, current_epoch) {
+            (Some(k), Some(e)) if k == project_key && e == epoch => Ok(()),
+            _ => Err("STALE_WORKSPACE".into()),
+        }
+    }
+
+    /// Bind a freshly swapped-in connection to a project key + epoch.
+    /// Call AFTER the swap, holding the transition lock (taken here), so no
+    /// checked write can observe a new connection with an old epoch.
+    pub(crate) fn rotate_workspace(
+        &self,
+        app: &tauri::AppHandle,
+        project_path: &Path,
+        title: &str,
+    ) -> Result<(String, String), String> {
+        let _transition = self
+            .workspace_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        // Canonicalize through filesystem resolution on the backend; do not
+        // lowercase (case-sensitive paths) and do not trust the frontend path.
+        let canonical = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
+        let canonical_str = canonical.to_string_lossy().to_string();
+        let key = self.with_recovery(app, |recovery| {
+            crate::note_recovery::register_project(recovery, &canonical_str, title)
+        })?;
+        let epoch = uuid::Uuid::new_v4().to_string();
+        *self.project_key.lock().map_err(|e| e.to_string())? = Some(key.clone());
+        *self.workspace_epoch.lock().map_err(|e| e.to_string())? = Some(epoch.clone());
+        Ok((key, epoch))
+    }
+
+    /// Unbind the workspace (close). Checked writes fail closed afterwards.
+    /// Takes the transition lock so a checked write cannot interleave with
+    /// the teardown it is validated against.
+    pub(crate) fn clear_workspace_binding(&self) {
+        // Order: transition first, per the module lock discipline.
+        if let Ok(_transition) = self.workspace_transition.lock() {
+            if let Ok(mut key) = self.project_key.lock() {
+                *key = None;
+            }
+            if let Ok(mut epoch) = self.workspace_epoch.lock() {
+                *epoch = None;
+            }
+        }
+    }
+
+    /// Recovery database path: the selftest override wins when set, so the
+    /// suites operate on a temporary root and can never clear real records.
+    pub(crate) fn recovery_db_path_for(&self, app: &tauri::AppHandle) -> Result<PathBuf, String> {
+        if let Ok(guard) = self.recovery_path_override.lock() {
+            if let Some(path) = guard.as_ref() {
+                return Ok(path.join(crate::note_recovery::RECOVERY_DB_FILENAME));
+            }
+        }
+        Ok(crate::note_recovery::recovery_db_path(
+            &crate::app_data::app_data_dir(app)?,
+        ))
+    }
+
+    /// Open the recovery database on first use and hand out scoped access.
+    /// A failure marks recovery unavailable (sticky, with the message kept
+    /// for the UI's Retry surface) and returns Err — but never panics, never
+    /// deletes an unreadable file, and never blocks editing itself.
+    pub(crate) fn with_recovery<F, T>(&self, app: &tauri::AppHandle, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&Connection) -> Result<T, String>,
+    {
+        let mut guard = self.recovery_db.lock().map_err(|e| e.to_string())?;
+        if guard.is_none() {
+            let path = self.recovery_db_path_for(app)?;
+            match crate::note_recovery::open_recovery_db(&path) {
+                Ok(conn) => {
+                    *guard = Some(conn);
+                    self.recovery_unavailable.store(false, Ordering::SeqCst);
+                    if let Ok(mut err) = self.recovery_error.lock() {
+                        *err = None;
+                    }
+                }
+                Err(error) => {
+                    self.recovery_unavailable.store(true, Ordering::SeqCst);
+                    if let Ok(mut err) = self.recovery_error.lock() {
+                        *err = Some(error.clone());
+                    }
+                    return Err(format!(
+                        "Draft recovery is unavailable ({error}). Editing still works in memory; retry to restore local backup."
+                    ));
+                }
+            }
+        }
+        let conn = guard.as_ref().ok_or_else(|| {
+            "Draft recovery is unavailable. Editing still works in memory.".to_string()
+        })?;
+        match f(conn) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if is_recovery_io_failure(&error) {
+                    self.recovery_unavailable.store(true, Ordering::SeqCst);
+                    if let Ok(mut slot) = self.recovery_error.lock() {
+                        *slot = Some(error.clone());
+                    }
+                    // Drop the poisoned connection so the next call reopens.
+                    *guard = None;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn bump_draft_seq(&self) {
+        self.draft_write_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn draft_seq(&self) -> u64 {
+        self.draft_write_seq.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn recovery_status(&self) -> (bool, Option<String>) {
+        let unavailable = self.recovery_unavailable.load(Ordering::SeqCst);
+        let error = self.recovery_error.lock().ok().and_then(|g| g.clone());
+        (unavailable, error)
+    }
+
+    // ── Native departure intents ────────────────────────────────────────────
+
+    /// Hold a native close/quit event for the frontend preflight. Returns the
+    /// one-use intent id the frontend must answer via `complete_note_departure`.
+    /// A second competing native intent while one is pending reuses the
+    /// pending id: two prompts for one decision is how answers get attached
+    /// to the wrong action.
+    pub(crate) fn request_native_departure(&self, kind: &str) -> String {
+        if let Ok(guard) = self.pending_departure.lock() {
+            if let Some(pending) = guard.as_ref() {
+                if pending.kind == kind {
+                    return pending.intent_id.clone();
+                }
+            }
+        }
+        let intent_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(mut guard) = self.pending_departure.lock() {
+            *guard = Some(PendingDeparture {
+                intent_id: intent_id.clone(),
+                kind: kind.to_string(),
+            });
+        }
+        intent_id
+    }
+
+    /// Consume whatever replay approval is present, for native-event replays
+    /// that do not carry the intent id back (window close / process exit).
+    /// Approvals are minted only by `complete_note_departure` immediately
+    /// before replaying, so a present approval always belongs to the action
+    /// being replayed.
+    pub(crate) fn take_any_departure_approval(&self) -> Option<String> {
+        self.departure_approved
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+    }
+}
+
+/// True when a recovery-layer error means the database itself is unusable
+/// (as opposed to a content/protocol outcome like a stale generation, which
+/// says nothing about the health of the store). Only IO failures poison the
+/// cached connection and raise the persistent `Draft recovery unavailable`
+/// surface; protocol outcomes leave recovery running.
+fn is_recovery_io_failure(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    [
+        "disk",
+        "i/o",
+        "locked",
+        "corrupt",
+        "unable to open",
+        "readonly",
+        "read-only",
+        "read only",
+        "permission",
+        "sqlite",
+        "database is",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 #[tauri::command]
@@ -282,6 +579,9 @@ pub fn create_project(
         initialize_local_v2_metadata(&app, conn)?;
         db::get_project_info(conn, &path.to_string_lossy()).map_err(|e| e.to_string())
     })?;
+    // A fresh connection means a fresh epoch: any checked write still
+    // carrying the previous study's credential fails closed.
+    let _ = state.rotate_workspace(&app, &path, &info.title);
 
     let path_str = path.to_string_lossy().to_string();
     let _ = app_data::record_recent_project(
@@ -308,7 +608,7 @@ pub async fn open_project(
 ) -> Result<ProjectOpenSnapshot, String> {
     state.ensure_update_writable()?;
     let path_clone = path.clone();
-    let (conn, snapshot) =
+    let (conn, mut snapshot) =
         tauri::async_runtime::spawn_blocking(move || db::open_project_snapshot_inner(&path_clone))
             .await
             .map_err(|e| e.to_string())?
@@ -323,7 +623,22 @@ pub async fn open_project(
     *state.db.lock().map_err(|e| e.to_string())? = Some(conn);
 
     state.with_conn(|conn| initialize_local_v2_metadata(&app, conn))?;
-
+    // Bind the swapped-in connection to a fresh project key + epoch BEFORE
+    // any checked write can run against it. Rotation takes the transition
+    // lock, so a write validating the old epoch cannot slip between the swap
+    // and the rotation.
+    match state.rotate_workspace(&app, Path::new(&path), &snapshot.project.title) {
+        Ok((project_key, epoch)) => {
+            snapshot.project_key = Some(project_key);
+            snapshot.workspace_epoch = Some(epoch);
+        }
+        Err(error) => {
+            // Recovery registration failing must not block opening the study:
+            // editing continues in memory with the persistent warning raised
+            // by with_recovery on first draft use.
+            let _ = error;
+        }
+    }
     // Task 10(c): Two folders, one group guard
     let group_id = state
         .with_conn(|conn| sync::get_state(conn, sync::KEY_PROJECT_ID).map_err(|e| e.to_string()))
@@ -386,6 +701,9 @@ pub fn close_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     if let Ok(p) = state.project_path_str() {
         crate::open_marker::remove_marker(Path::new(&p));
     }
+    // Unbind first (transition lock): checked writes fail closed from here,
+    // and the teardown below cannot interleave with one mid-validation.
+    state.clear_workspace_binding();
     *state.project_path.lock().map_err(|e| e.to_string())? = None;
     *state.db.lock().map_err(|e| e.to_string())? = None;
     Ok(())
@@ -422,6 +740,7 @@ pub fn list_backups(state: State<'_, AppState>) -> Result<Vec<backup::BackupInfo
 /// explain.
 #[tauri::command]
 pub fn restore_backup(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     backup_path: String,
 ) -> Result<backup::RestoreOutcome, String> {
@@ -433,7 +752,15 @@ pub fn restore_backup(
     // that snapshot miss the most recent coding — exactly the work most worth
     // keeping when somebody is about to overwrite it.
     state.checkpoint_open_project();
-    *state.db.lock().map_err(|e| e.to_string())? = None;
+    // Replacement: drop the connection under the transition lock so checked
+    // writes cannot validate against the pre-restore database.
+    {
+        let _transition = state
+            .workspace_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        *state.db.lock().map_err(|e| e.to_string())? = None;
+    }
 
     let outcome = backup::restore(&project_path, &archive);
 
@@ -451,6 +778,14 @@ pub fn restore_backup(
                 }
             })
         }
+    }
+    // The restored database replaces every row: rotate the epoch so in-flight
+    // drafts re-resolve against the restored content instead of writing
+    // against pre-restore base text. The recovery DB itself is untouched.
+    if let Ok(info) = state.with_conn(|conn| {
+        db::get_project_info(conn, &project_path.to_string_lossy()).map_err(|e| e.to_string())
+    }) {
+        let _ = state.rotate_workspace(&app, &project_path, &info.title);
     }
 
     outcome
@@ -514,10 +849,14 @@ pub fn get_live_workspace_snapshot(
     active_interview_id: Option<String>,
 ) -> Result<LiveWorkspaceSnapshot, String> {
     let path = state.project_path_str()?;
-    state.with_conn(|conn| {
+    let mut snapshot = state.with_conn(|conn| {
         db::get_live_workspace_snapshot(conn, &path, active_interview_id.as_deref())
             .map_err(|e| e.to_string())
-    })
+    })?;
+    let (project_key, epoch) = state.current_workspace();
+    snapshot.project_key = project_key;
+    snapshot.workspace_epoch = epoch;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -875,6 +1214,354 @@ pub fn update_hub_memo(
     })
 }
 
+// ── Note drafts: local recovery + checked writes ────────────────────────────
+//
+// Every checked write validates (project_key, epoch) under the
+// workspace-transition lock before touching either database, and the project
+// commit runs inside one CAS transaction. Recovery cleanup is conditional on
+// the acknowledged revision: commit the note first, then clear recovery.
+
+#[tauri::command]
+pub fn note_recovery_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecoveryStatus, String> {
+    // A status probe that initializes recovery when it has never run: the
+    // first paint of the Unfinished notes badge must reflect reality, and a
+    // lazy open here is indistinguishable from one on first draft use.
+    let probe = state.with_recovery(&app, |conn| {
+        crate::note_recovery::list_active_drafts(conn).map(|_| ())
+    });
+    let (unavailable, error) = state.recovery_status();
+    Ok(match probe {
+        Ok(()) => RecoveryStatus {
+            available: !unavailable,
+            error,
+        },
+        Err(io_error) => RecoveryStatus {
+            available: false,
+            error: Some(io_error),
+        },
+    })
+}
+
+#[tauri::command]
+pub fn list_note_drafts(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<NoteDraftRecord>, String> {
+    state.with_recovery(&app, crate::note_recovery::list_active_drafts)
+}
+
+#[tauri::command]
+pub fn begin_note_draft(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: BeginNoteDraftInput,
+) -> Result<BeginNoteDraftResult, String> {
+    crate::note_recovery::validate_kind(&input.kind)?;
+    // Hold the transition lock across validation + begin so the connection
+    // this epoch names cannot be replaced underneath us.
+    let _transition = state
+        .workspace_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if state
+        .check_workspace_under_transition(&input.project_key, &input.epoch)
+        .is_err()
+    {
+        return Ok(BeginNoteDraftResult::StaleWorkspace);
+    }
+    let live = state.with_conn(|conn| {
+        crate::note_recovery::read_live_memo(conn, &input.kind, &input.target_id)
+    })?;
+    let committed_text = match live {
+        Some(text) => text,
+        None => return Ok(BeginNoteDraftResult::MissingTarget),
+    };
+    let now = db::now_iso();
+    let record = state.with_recovery(&app, |recovery| {
+        crate::note_recovery::begin_draft_for_target(
+            recovery,
+            &input.project_key,
+            &input.kind,
+            &input.target_id,
+            &input.interview_id,
+            input.coder_name.as_deref(),
+            &committed_text,
+            &input.participant_label,
+            input.segment_id.as_deref(),
+            input.segment_index,
+            input.char_start,
+            input.char_end,
+            input.quote_text.as_deref(),
+            &now,
+        )
+    })?;
+    state.bump_draft_seq();
+    Ok(BeginNoteDraftResult::Active {
+        record: Box::new(record),
+        committed_text,
+    })
+}
+
+#[tauri::command]
+pub fn put_note_draft(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: PutNoteDraftInput,
+) -> Result<PutNoteDraftResult, String> {
+    let _transition = state
+        .workspace_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if state
+        .check_workspace_under_transition(&input.project_key, &input.epoch)
+        .is_err()
+    {
+        return Ok(PutNoteDraftResult::StaleWorkspace);
+    }
+    let now = db::now_iso();
+    let stored = state.with_recovery(&app, |recovery| {
+        crate::note_recovery::put_draft_text(
+            recovery,
+            &input.draft_id,
+            input.expected_revision,
+            &input.draft_text,
+            &now,
+        )
+    });
+    match stored {
+        Ok(record) => {
+            state.bump_draft_seq();
+            Ok(PutNoteDraftResult::Stored { record })
+        }
+        Err(error) if error == "STALE_GENERATION" => Ok(PutNoteDraftResult::StaleGeneration),
+        Err(error) if error == "REVISION_MISMATCH" => {
+            // Report the winning revision so the caller replays the latest
+            // snapshot instead of dropping the newer text.
+            let current = state
+                .with_recovery(&app, |recovery| {
+                    crate::note_recovery::get_draft_by_id(recovery, &input.draft_id)?
+                        .ok_or_else(|| "STALE_GENERATION".to_string())
+                })
+                .map_err(|_| "REVISION_MISMATCH".to_string());
+            match current {
+                Ok(record) => Ok(PutNoteDraftResult::RevisionMismatch { record }),
+                Err(_) => Ok(PutNoteDraftResult::StaleGeneration),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+pub fn discard_note_draft(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: DiscardNoteDraftInput,
+) -> Result<DiscardNoteDraftResult, String> {
+    // No epoch check: orphans are discarded with no project open, and an
+    // explicit discard is authoritative over whatever the workspace says.
+    let now = db::now_iso();
+    let result = state.with_recovery(&app, |recovery| {
+        crate::note_recovery::tombstone_draft(recovery, &input.draft_id, &now)
+    })?;
+    state.bump_draft_seq();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn save_note_draft(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: SaveNoteDraftInput,
+) -> Result<SaveNoteDraftResult, String> {
+    crate::note_recovery::validate_kind(&input.kind)?;
+    // The whole checked commit — validation, CAS transaction, conditional
+    // recovery cleanup — runs under the transition lock, so no open, close,
+    // restore or updater swap can interleave with it.
+    let _transition = state
+        .workspace_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if state
+        .check_workspace_under_transition(&input.project_key, &input.epoch)
+        .is_err()
+    {
+        return Ok(SaveNoteDraftResult::StaleWorkspace);
+    }
+    let memory_only = input.draft_id.is_empty();
+    let draft_id_opt: Option<&str> = if memory_only {
+        None
+    } else {
+        Some(&input.draft_id)
+    };
+    let commit = state.with_conn(|project_conn| {
+        state
+            .with_recovery(&app, |recovery_conn| {
+                crate::note_recovery::commit_then_cleanup(
+                    project_conn,
+                    Some(recovery_conn),
+                    &input.kind,
+                    &input.target_id,
+                    &input.expected_saved_text,
+                    &input.draft_text,
+                    draft_id_opt,
+                    input.revision,
+                    &db::now_iso(),
+                )
+            })
+            // Recovery being unavailable must not block an explicit save:
+            // commit the memory-only draft through the same CAS checks and
+            // surface the recovery warning separately via the status probe.
+            .or_else(|recovery_error| {
+                if memory_only || recovery_error.contains("Draft recovery is unavailable") {
+                    crate::note_recovery::commit_then_cleanup(
+                        project_conn,
+                        None,
+                        &input.kind,
+                        &input.target_id,
+                        &input.expected_saved_text,
+                        &input.draft_text,
+                        None,
+                        input.revision,
+                        &db::now_iso(),
+                    )
+                } else {
+                    Err(recovery_error)
+                }
+            })
+    })?;
+    if let SaveNoteDraftResult::Saved { .. } = &commit {
+        if input.kind == "coding" {
+            schedule_committed_shared_mutation(app.clone(), &state);
+        }
+        state.bump_draft_seq();
+    }
+    Ok(commit)
+}
+
+#[tauri::command]
+pub fn resolve_note_draft_target(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    draft_id: String,
+) -> Result<ResolveNoteDraftTargetResult, String> {
+    let draft = state.with_recovery(&app, |recovery| {
+        crate::note_recovery::get_draft_by_id(recovery, &draft_id)?
+            .ok_or_else(|| "That unfinished note is no longer in local recovery.".to_string())
+    })?;
+    let (open_key, _) = state.current_workspace();
+    match open_key {
+        None => Ok(ResolveNoteDraftTargetResult::missing(
+            draft.draft_id.clone(),
+            "no-project",
+        )),
+        Some(key) if key != draft.project_key => Ok(ResolveNoteDraftTargetResult::missing(
+            draft.draft_id.clone(),
+            "other-project",
+        )),
+        Some(_) => state
+            .with_conn(|conn| crate::note_recovery::resolve_draft_against_project(conn, &draft)),
+    }
+}
+
+/// Selftest-only injection: redirect recovery storage at a temporary root so
+/// the suites never read, write, or clear real recovery records. Refused
+/// outside `--selftest` mode; passing null restores the real location.
+#[tauri::command]
+pub fn set_recovery_root_for_selftest(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    if !crate::selftest::is_selftest_active() {
+        return Err("Recovery test injection is only available in selftest mode.".into());
+    }
+    *state
+        .recovery_path_override
+        .lock()
+        .map_err(|e| e.to_string())? = path.map(PathBuf::from);
+    // Drop any cached connection so the next recovery use opens the
+    // overridden location, and clear the unavailable latch for the suite.
+    *state.recovery_db.lock().map_err(|e| e.to_string())? = None;
+    state.recovery_unavailable.store(false, Ordering::SeqCst);
+    if let Ok(mut err) = state.recovery_error.lock() {
+        *err = None;
+    }
+    Ok(())
+}
+
+/// Mint a one-use updater approval after the frontend draft preflight has
+/// passed. Bound to the current workspace identity and draft-write sequence:
+/// any draft write landing between approval and install invalidates it.
+#[tauri::command]
+pub fn approve_update_departure(
+    state: State<'_, AppState>,
+) -> Result<UpdateDepartureApproval, String> {
+    let (project_key, epoch) = state.current_workspace();
+    let approval = UpdateDepartureApproval {
+        token: uuid::Uuid::new_v4().to_string(),
+        project_key: project_key.clone(),
+        epoch: epoch.clone(),
+        draft_write_seq: state.draft_seq(),
+    };
+    *state
+        .update_departure_approval
+        .lock()
+        .map_err(|e| e.to_string())? = Some(StoredUpdateApproval {
+        token: approval.token.clone(),
+        project_key,
+        epoch,
+        draft_write_seq: approval.draft_write_seq,
+    });
+    Ok(approval)
+}
+
+/// Complete a held native close/quit intent after the frontend preflight.
+/// Consumes the intent either way; on approval, replays the original native
+/// action once (which the one-use approval lets through without prompting).
+#[tauri::command]
+pub fn complete_note_departure(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    intent_id: String,
+    approved: bool,
+) -> Result<DepartureCompletion, String> {
+    let pending = state
+        .pending_departure
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let pending = match pending {
+        Some(intent) if intent.intent_id == intent_id => intent,
+        _ => return Err("That close request has already been handled.".into()),
+    };
+    *state.pending_departure.lock().map_err(|e| e.to_string())? = None;
+    if !approved {
+        return Ok(DepartureCompletion {
+            intent_id,
+            replayed: "cancelled".into(),
+        });
+    }
+    *state.departure_approved.lock().map_err(|e| e.to_string())? = Some(intent_id.clone());
+    if pending.kind == "quit" {
+        app.exit(0);
+        Ok(DepartureCompletion {
+            intent_id,
+            replayed: "quit".into(),
+        })
+    } else {
+        if let Some(window) = app.get_webview_window("main") {
+            window.close().map_err(|e| e.to_string())?;
+        }
+        Ok(DepartureCompletion {
+            intent_id,
+            replayed: "close".into(),
+        })
+    }
+}
+
 #[tauri::command]
 pub fn clear_workspace(
     state: State<'_, AppState>,
@@ -966,8 +1653,87 @@ pub fn update_cancel_download(
 pub async fn update_install(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    approval: Option<String>,
 ) -> Result<crate::update_coordinator::UpdateCoordinatorStatus, String> {
+    enforce_update_departure_approval(Some(&app), &state, approval)?;
     state.update_coordinator.install(app, &state).await
+}
+
+/// Reject an update install that would bypass unsaved draft work.
+///
+/// The approval minted by `approve_update_departure` (after the frontend ran
+/// its Save/Discard/Cancel preflight) is required exactly when there is work
+/// to lose: a project is open AND (unfinished drafts exist for it OR recovery
+/// itself is unavailable, so the backend cannot prove there is nothing).
+/// The approval is one-use and bound to workspace identity + draft sequence;
+/// a stale token, a rotated epoch, or an intervening draft write all reject
+/// rather than installing over work the user never approved losing.
+pub(crate) fn enforce_update_departure_approval(
+    app: Option<&tauri::AppHandle>,
+    state: &AppState,
+    approval: Option<String>,
+) -> Result<(), String> {
+    let project_open = state
+        .project_path
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if !project_open {
+        return Ok(());
+    }
+    let needs_approval = {
+        let (key, _) = state.current_workspace();
+        match key {
+            None => false,
+            Some(project_key) => {
+                let (unavailable, _) = state.recovery_status();
+                if unavailable {
+                    true
+                } else {
+                    match app {
+                        // The store cannot be consulted: fail closed rather
+                        // than installing over unknown unfinished work.
+                        None => true,
+                        Some(handle) => state
+                            .with_recovery(handle, |recovery| {
+                                crate::note_recovery::count_active_drafts_for_project(
+                                    recovery,
+                                    &project_key,
+                                )
+                                .map(|count| count > 0)
+                            })
+                            .unwrap_or(true),
+                    }
+                }
+            }
+        }
+    };
+    if !needs_approval {
+        return Ok(());
+    }
+    let token = approval.filter(|t| !t.is_empty()).ok_or_else(|| {
+        "This study has unfinished notes. Save or discard them before installing the update."
+            .to_string()
+    })?;
+    let mut slot = state
+        .update_departure_approval
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let stored = slot.take().ok_or_else(|| {
+        "That update approval has already been used. Re-confirm to install.".to_string()
+    })?;
+    let (current_key, current_epoch) = state.current_workspace();
+    if stored.token != token
+        || stored.project_key != current_key
+        || stored.epoch != current_epoch
+        || stored.draft_write_seq != state.draft_seq()
+    {
+        return Err(
+            "Notes changed since the update was approved. Review them and approve again."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Hand over any project double-clicked before this page could listen, and
@@ -3649,5 +4415,58 @@ mod command_contract_tests {
         let (poisoned, status) = crate::diagnostics::check_poisoned_install(exe_dir);
         assert!(poisoned);
         assert!(status.contains("directory"));
+    }
+
+    #[test]
+    fn stale_epoch_rejected_after_switching_to_clone() {
+        // Two opens of different folders (a clone carries identical coding
+        // ids): the second rotation invalidates the first epoch, so a write
+        // credentialed for the original fails closed on the clone.
+        let state = AppState::new();
+        *state.project_key.lock().unwrap() = Some("key-original".into());
+        *state.workspace_epoch.lock().unwrap() = Some("epoch-1".into());
+        assert!(state
+            .check_workspace_under_transition("key-original", "epoch-1")
+            .is_ok());
+        // Switch to the clone: new key AND new epoch.
+        *state.project_key.lock().unwrap() = Some("key-clone".into());
+        *state.workspace_epoch.lock().unwrap() = Some("epoch-2".into());
+        assert_eq!(
+            state
+                .check_workspace_under_transition("key-original", "epoch-1")
+                .unwrap_err(),
+            "STALE_WORKSPACE"
+        );
+        // Same key but rotated epoch (restore/reopen) also fails closed.
+        assert_eq!(
+            state
+                .check_workspace_under_transition("key-clone", "epoch-1")
+                .unwrap_err(),
+            "STALE_WORKSPACE"
+        );
+        assert!(state
+            .check_workspace_under_transition("key-clone", "epoch-2")
+            .is_ok());
+        // Close unbinds everything.
+        state.clear_workspace_binding();
+        assert_eq!(
+            state
+                .check_workspace_under_transition("key-clone", "epoch-2")
+                .unwrap_err(),
+            "STALE_WORKSPACE"
+        );
+    }
+
+    #[test]
+    fn update_approval_gates_only_when_work_is_open() {
+        let state = AppState::new();
+        // No project open: nothing to lose, no approval needed.
+        assert!(super::enforce_update_departure_approval(None, &state, None).is_ok());
+        // Project open but the store cannot be consulted: fail closed and
+        // require an approval rather than installing over unknown drafts.
+        *state.project_path.lock().unwrap() = Some(PathBuf::from("/studies/alpha"));
+        *state.project_key.lock().unwrap() = Some("key-1".into());
+        *state.workspace_epoch.lock().unwrap() = Some("epoch-1".into());
+        assert!(super::enforce_update_departure_approval(None, &state, None).is_err());
     }
 }

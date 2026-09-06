@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useProjectStore } from "../store/project-store";
 import { Icon } from "./ui/Icon";
 import { modKey } from "../lib/platform";
+import { textOnSolid } from "../lib/code-colors";
 
 /**
  * The coding surface, anchored to the text being coded.
@@ -361,8 +362,8 @@ export function SelectionBubble({
               type="button"
               onClick={() => void toggleCodeOnTarget(c.id)}
               title={`Remove “${c.name}”`}
-              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium text-white transition-opacity hover:opacity-75"
-              style={{ backgroundColor: c.color }}
+              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-75"
+              style={{ backgroundColor: c.color, color: textOnSolid(c.color) }}
             >
               {c.name}
               <Icon name="close" size={9} />

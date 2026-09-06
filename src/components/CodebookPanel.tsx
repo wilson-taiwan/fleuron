@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import { useProjectStore } from "../store/project-store";
 import { useAppStore } from "../store/app-store";
-import { nextCodeColor } from "../lib/code-colors";
+import { nextCodeColor, textOnSolid } from "../lib/code-colors";
 import { Icon } from "./ui/Icon";
 import { Tooltip } from "./ui/Tooltip";
 import { CodeEditorModal } from "./CodeEditorModal";
@@ -597,13 +597,14 @@ export function CodebookPanel() {
                         className="mt-[5px] grid h-3 w-3 shrink-0 place-items-center rounded-full transition-transform"
                         style={{
                           backgroundColor: code.color,
+                          // The check mark draws in currentColor on the solid
+                          // fill: keep its contrast at 3:1+, not white.
+                          color: textOnSolid(code.color),
                           transform: selected ? "scale(1.15)" : "scale(1)",
                           boxShadow: selected ? `0 0 0 3px ${code.color}33` : "none",
                         }}
                       >
-                        {selected && (
-                          <Icon name="check" size={8} className="text-white" />
-                        )}
+                        {selected && <Icon name="check" size={8} />}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span

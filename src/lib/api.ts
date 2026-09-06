@@ -6,6 +6,19 @@ import type {
   AppPreferences,
   AppVersionInfo,
   RestoreOutcome,
+  BeginNoteDraftInput,
+  BeginNoteDraftResult,
+  PutNoteDraftInput,
+  PutNoteDraftResult,
+  DiscardNoteDraftInput,
+  DiscardNoteDraftResult,
+  SaveNoteDraftInput,
+  SaveNoteDraftResult,
+  ResolveNoteDraftTargetResult,
+  UpdateDepartureApproval,
+  DepartureCompletion,
+  RecoveryStatus,
+  NoteDraftRecord,
   ClearWorkspaceInput,
   ClearWorkspaceResult,
   Code,
@@ -209,6 +222,42 @@ export const api = {
 
   updateHubMemo: (interviewId: string, memo: string) =>
     invoke<void>("update_hub_memo", { interviewId, memo }),
+
+  // ── Note drafts: local recovery + checked writes ──────────────────────────
+
+  noteRecoveryStatus: () => invoke<RecoveryStatus>("note_recovery_status"),
+
+  listNoteDrafts: () => invoke<NoteDraftRecord[]>("list_note_drafts"),
+
+  beginNoteDraft: (input: BeginNoteDraftInput) =>
+    invoke<BeginNoteDraftResult>("begin_note_draft", { input }),
+
+  putNoteDraft: (input: PutNoteDraftInput) =>
+    invoke<PutNoteDraftResult>("put_note_draft", { input }),
+
+  discardNoteDraft: (input: DiscardNoteDraftInput) =>
+    invoke<DiscardNoteDraftResult>("discard_note_draft", { input }),
+
+  saveNoteDraft: (input: SaveNoteDraftInput) =>
+    invoke<SaveNoteDraftResult>("save_note_draft", { input }),
+
+  resolveNoteDraftTarget: (draftId: string) =>
+    invoke<ResolveNoteDraftTargetResult>("resolve_note_draft_target", {
+      draftId,
+    }),
+
+  /** Selftest only: redirect recovery storage at a temporary root. */
+  setRecoveryRootForSelftest: (path: string | null) =>
+    invoke<void>("set_recovery_root_for_selftest", { path }),
+
+  approveUpdateDeparture: () =>
+    invoke<UpdateDepartureApproval>("approve_update_departure"),
+
+  completeNoteDeparture: (intentId: string, approved: boolean) =>
+    invoke<DepartureCompletion>("complete_note_departure", {
+      intentId,
+      approved,
+    }),
 
   clearWorkspace: (input: ClearWorkspaceInput) =>
     invoke<ClearWorkspaceResult>("clear_workspace", { input }),
@@ -475,7 +524,10 @@ export const api = {
 
   updateCancelDownload: () => invoke<UpdateCoordinatorStatus>("update_cancel_download"),
 
-  updateInstall: () => invoke<UpdateCoordinatorStatus>("update_install"),
+  updateInstall: (approval?: string | null) =>
+    invoke<UpdateCoordinatorStatus>("update_install", {
+      approval: approval ?? null,
+    }),
 
   /** Refresh cached server schema version. */
   syncRefreshServerSchema: () =>

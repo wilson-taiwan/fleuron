@@ -80,10 +80,29 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
   installUpdate: async () => {
     if (get().installing) return;
+    // Draft approval BEFORE the coordinator sets update_write_blocked or
+    // closes the project: cancelling leaves the ready-to-install state with
+    // no download/installer mutation.
+    const { useNoteDepartureStore } = await import("./note-departure-store");
+    const { useNoteDraftStore } = await import("./note-draft-store");
+    const gate = await useNoteDepartureStore.getState().requestDeparture("update");
+    if (!gate.proceed) return;
+    // The update path never closes through the store: consume the generic
+    // approval here so it cannot approve a later, different close.
+    useNoteDepartureStore.getState().consumeCloseApproval();
+    // Freeze frontend edits between approval and install; the backend
+    // validates the approved epoch and that no draft write intervened.
+    const drafts = useNoteDraftStore.getState();
+    drafts.setFrozen(true);
     try {
-      set(stateFromStatus(await api.updateInstall()));
+      const approval = await api.approveUpdateDeparture();
+      set(stateFromStatus(await api.updateInstall(approval.token)));
     } catch {
       await get().refreshUpdateStatus();
+    } finally {
+      // Installation failure clears the departure approval (one-use token
+      // is already consumed) and resumes the workspace for editing.
+      drafts.setFrozen(false);
     }
   },
 

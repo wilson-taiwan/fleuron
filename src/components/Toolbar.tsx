@@ -13,6 +13,7 @@ import { UpdateAction, describeUpdateAction } from "./UpdateAction";
 import { useSyncStore } from "../store/sync-store";
 import { useUpdateStore } from "../store/update-store";
 import { shortcut } from "../lib/platform";
+import { useUnfinishedNotesCount } from "./NoteRecoveryPanel";
 import type { PresenceUser } from "../lib/types";
 
 export interface BreadcrumbParams {
@@ -75,7 +76,6 @@ export function Toolbar() {
     setActiveCoder,
     interviews,
     activeInterviewId,
-    selectInterview,
     requestExportProject,
     requestCloseProject,
     requestResetWorkspace,
@@ -84,6 +84,7 @@ export function Toolbar() {
     setShowProjectFiles,
     setShowBackups,
     setShowInterviewMemo,
+    setShowRecoveryPanel,
     interviewHistory,
     historyCursor,
     goBackInterview,
@@ -95,7 +96,6 @@ export function Toolbar() {
       setActiveCoder: s.setActiveCoder,
       interviews: s.interviews,
       activeInterviewId: s.activeInterviewId,
-      selectInterview: s.selectInterview,
       requestExportProject: s.requestExportProject,
       requestCloseProject: s.requestCloseProject,
       requestResetWorkspace: s.requestResetWorkspace,
@@ -104,6 +104,7 @@ export function Toolbar() {
       setShowProjectFiles: s.setShowProjectFiles,
       setShowBackups: s.setShowBackups,
       setShowInterviewMemo: s.setShowInterviewMemo,
+      setShowRecoveryPanel: s.setShowRecoveryPanel,
       interviewHistory: s.interviewHistory,
       historyCursor: s.historyCursor,
       goBackInterview: s.goBackInterview,
@@ -119,8 +120,8 @@ export function Toolbar() {
   const inGroup = useSyncStore((s) => s.status?.inGroup ?? false);
   const group = useSyncStore((s) => s.group);
 
-  const [participantMenuOpen, setParticipantMenuOpen] = useState(false);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
+  const unfinishedCount = useUnfinishedNotesCount();
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -206,30 +207,31 @@ export function Toolbar() {
         </span>
         <span className="text-[var(--ink-4)] shrink-0 select-none">›</span>
 
-        {/* Back and Forward transcript navigation */}
+        {/* Back / Forward interview history. The reading header's Current
+            interview selector is the primary switcher; these walk history. */}
         <div
           data-tauri-drag-region="false"
           className="flex items-center gap-0.5 shrink-0"
         >
-          <Tooltip content={`Previous transcript (${shortcut("mod", "[")})`}>
+          <Tooltip content={`Back (${shortcut("mod", "[")})`}>
             <button
               type="button"
               disabled={historyCursor <= 0}
               onClick={() => void goBackInterview()}
-              aria-label="Previous transcript"
-              title={`Previous transcript (${shortcut("mod", "[")})`}
+              aria-label="Back"
+              title={`Back (${shortcut("mod", "[")})`}
               className="btn btn-ghost btn-sm h-6 w-6 p-0 grid place-items-center rounded disabled:opacity-30 text-[var(--ink-3)] hover:text-[var(--ink)]"
             >
               <Icon name="chevronLeft" size={13} />
             </button>
           </Tooltip>
-          <Tooltip content={`Next transcript (${shortcut("mod", "]")})`}>
+          <Tooltip content={`Forward (${shortcut("mod", "]")})`}>
             <button
               type="button"
               disabled={historyCursor < 0 || historyCursor >= interviewHistory.length - 1}
               onClick={() => void goForwardInterview()}
-              aria-label="Next transcript"
-              title={`Next transcript (${shortcut("mod", "]")})`}
+              aria-label="Forward"
+              title={`Forward (${shortcut("mod", "]")})`}
               className="btn btn-ghost btn-sm h-6 w-6 p-0 grid place-items-center rounded disabled:opacity-30 text-[var(--ink-3)] hover:text-[var(--ink)]"
             >
               <Icon name="chevronRight" size={13} />
@@ -237,61 +239,17 @@ export function Toolbar() {
           </Tooltip>
         </div>
 
-        {/* Participant segment with dropdown switcher */}
-        <div className="relative shrink min-w-0 max-w-[150px]">
-          <button
-            type="button"
-            data-tauri-drag-region="false"
-            onClick={() => setParticipantMenuOpen((v) => !v)}
-            className="flex items-center gap-1 truncate rounded px-1.5 py-0.5 hover:bg-[var(--fill)] font-medium text-[var(--ink-2)]"
-            title="Switch participant"
-          >
-            <span className="truncate">
-              {segments.participant.label}
-              {!segments.participant.isLinked && " (not linked)"}
-            </span>
-            <Icon name="chevronDown" size={11} className="shrink-0 text-[var(--ink-4)]" />
-          </button>
-
-          {participantMenuOpen && (
-            <>
-              <div
-                className="fixed inset-0 z-40"
-                onClick={() => setParticipantMenuOpen(false)}
-              />
-              <div
-                data-tauri-drag-region="false"
-                className="popover absolute left-0 top-full mt-1 z-50 min-w-[200px] max-h-[300px] overflow-y-auto py-1 shadow-lg"
-                onClick={() => setParticipantMenuOpen(false)}
-              >
-                {interviews.length === 0 ? (
-                  <div className="px-3 py-1.5 text-[12px] text-[var(--ink-4)]">
-                    No participants yet
-                  </div>
-                ) : (
-                  interviews.map((iv) => (
-                    <button
-                      key={iv.id}
-                      type="button"
-                      onClick={() => selectInterview(iv.id)}
-                      className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[13px] hover:bg-[var(--fill)] ${
-                        iv.id === activeInterviewId
-                          ? "font-semibold text-[var(--ink-1)]"
-                          : "text-[var(--ink-2)]"
-                      }`}
-                    >
-                      <span className="truncate">{iv.participant_label}</span>
-                      {iv.segment_count === 0 && (
-                        <span className="text-[11px] text-[var(--ink-4)]">
-                          not linked
-                        </span>
-                      )}
-                    </button>
-                  ))
-                )}
-              </div>
-            </>
-          )}
+        {/* Participant breadcrumb: plain text, not a second switcher. The
+            reading header's Current interview selector is the only primary
+            switcher. Long titles truncate with the full title available. */}
+        <div
+          className="shrink min-w-0 max-w-[220px] truncate px-1.5 py-0.5 font-medium text-[var(--ink-2)]"
+          title={`${segments.participant.label}${segments.participant.isLinked ? "" : " (not linked)"}`}
+        >
+          <span className="truncate">
+            {segments.participant.label}
+            {!segments.participant.isLinked && " (not linked)"}
+          </span>
         </div>
 
         <span className="text-[var(--ink-4)] shrink-0 select-none">›</span>
@@ -408,6 +366,12 @@ export function Toolbar() {
               label: "Notes on this interview…",
               icon: "note",
               onSelect: () => setShowInterviewMemo(true),
+            },
+            {
+              label: "Unfinished notes…",
+              icon: "note",
+              badge: unfinishedCount,
+              onSelect: () => setShowRecoveryPanel(true),
             },
             {
               label: "Backups…",

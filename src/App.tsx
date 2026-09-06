@@ -17,9 +17,12 @@ import { OpeningOverlay } from "./components/OpeningOverlay";
 import { UpdatePreparationOverlay } from "./components/UpdateAction";
 import { SelftestRunner } from "./selftest/runner";
 import { ToastStack } from "./components/ToastStack";
+import { NoteRecoveryPanel } from "./components/NoteRecoveryPanel";
 import { api } from "./lib/api";
 import { useAppInit, useGlobalKeyboardShortcuts } from "./hooks/useAppInit";
 import { useMenuEvents } from "./hooks/useMenuEvents";
+import { useNativeDeparture } from "./hooks/useNativeDeparture";
+import { NoteDepartureDialog } from "./components/NoteDepartureDialog";
 
 function App() {
   const project = useProjectStore((s) => s.project);
@@ -68,6 +71,7 @@ function App() {
   useAppInit();
   useGlobalKeyboardShortcuts();
   useMenuEvents();
+  useNativeDeparture();
 
   return (
     <>
@@ -84,7 +88,13 @@ function App() {
       <TrustCenterPanel />
       <ConfirmDialog />
       <UpdatePreparationOverlay />
+      {/* The single typed departure dialog for every guarded action. */}
+      <NoteDepartureDialog />
+      {/* The single Notifications region: every toast in the app funnels
+          through this one host, so one failure produces one announcement. */}
       <ToastStack />
+      {/* App-local recovery: available with no study open (welcome screen). */}
+      <NoteRecoveryPanel />
       {loading && <OpeningOverlay path={openingPath} />}
       {isSelftest && <SelftestRunner />}
     </>

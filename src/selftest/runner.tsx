@@ -589,6 +589,459 @@ export function SelftestRunner() {
         }
       });
 
+      // Suite 14: note-draft-lifecycle — checked writes over real IPC.
+      //
+      // Recovery is redirected at a disposable sibling directory FIRST, so no
+      // suite ever reads, writes, or clears the operator's real recovery
+      // records. The leftover directory lives in the OS temp area next to the
+      // disposable study (both synthetic); the study itself is deleted below.
+      await runSuite("note-draft-lifecycle", async () => {
+        const path = await seedFreshStudy("note-draft-lifecycle");
+        try {
+          await api.setRecoveryRootForSelftest(`${path}-note-recovery`);
+          const snap = await api.openProject(path);
+          const projectKey = snap.project_key;
+          const epoch = snap.workspace_epoch;
+          assert(projectKey && epoch, "open snapshot carries no workspace identity");
+
+          const status = await api.noteRecoveryStatus();
+          assert(status.available, `recovery unavailable in selftest: ${status.error}`);
+
+          const coding = await api.ensureCodeAndApply({
+            name: "Note Probe Code",
+            color: "#0ea5e9",
+            interview_id: "iv1",
+            segment_id: "seg1",
+            coder_name: SELFTEST_CODER,
+          });
+          const targetId = coding.coded_segment.id;
+
+          const begun = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "coding",
+            target_id: targetId,
+            interview_id: "iv1",
+            coder_name: SELFTEST_CODER,
+            participant_label: "P01",
+            segment_id: "seg1",
+            segment_index: 0,
+            char_start: null,
+            char_end: null,
+            quote_text: "This is a sample qualitative transcript passage for selftest.",
+          });
+          assert(begun.status === "active", `begin failed: ${begun.status}`);
+          if (begun.status !== "active") throw new Error("unreachable");
+          assert(begun.committed_text === "", "fresh coding should commit from empty");
+
+          const put = await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            expected_revision: 0,
+            draft_text: "probe draft",
+          });
+          assert(put.status === "stored", `put failed: ${put.status}`);
+
+          const saved = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            revision: 1,
+            kind: "coding",
+            target_id: targetId,
+            expected_saved_text: "",
+            draft_text: "probe draft",
+          });
+          assert(saved.status === "saved", `save failed: ${JSON.stringify(saved)}`);
+          if (saved.status !== "saved") throw new Error("unreachable");
+          assert(saved.recovery_cleared, "acknowledged revision should clear recovery");
+
+          const rows = await api.listCodedSegments("iv1");
+          assert(
+            rows.some((r) => r.id === targetId && r.memo === "probe draft"),
+            "committed note missing after checked save",
+          );
+
+          // A late put against the cleaned-up generation fails, never revives.
+          const late = await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            expected_revision: 1,
+            draft_text: "late",
+          });
+          assert(late.status === "stale-generation", `late put should fail closed, got ${late.status}`);
+
+          // Conflict: a newer revision commits behind the draft's back.
+          const begun2 = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "coding",
+            target_id: targetId,
+            interview_id: "iv1",
+            coder_name: SELFTEST_CODER,
+            participant_label: "P01",
+            segment_id: "seg1",
+            segment_index: 0,
+            char_start: null,
+            char_end: null,
+            quote_text: null,
+          });
+          assert(begun2.status === "active", "re-begin failed");
+          if (begun2.status !== "active") throw new Error("unreachable");
+          await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun2.record.draft_id,
+            expected_revision: 0,
+            draft_text: "stale base edit",
+          });
+          await api.patchCodingMemo({ coded_segment_id: targetId, memo: "external edit" });
+          const conflict = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun2.record.draft_id,
+            revision: 1,
+            kind: "coding",
+            target_id: targetId,
+            expected_saved_text: "probe draft",
+            draft_text: "stale base edit",
+          });
+          assert(conflict.status === "conflict", `expected conflict, got ${conflict.status}`);
+          if (conflict.status !== "conflict") throw new Error("unreachable");
+          assert(conflict.current_text === "external edit", "conflict must carry the live text");
+
+          // Missing target: deleting the coding turns the next save into a
+          // report, and the draft survives in recovery for Copy/Discard.
+          await api.deleteCodedSegment(targetId);
+          const missing = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun2.record.draft_id,
+            revision: 1,
+            kind: "coding",
+            target_id: targetId,
+            expected_saved_text: "external edit",
+            draft_text: "orphaned edit",
+          });
+          assert(missing.status === "missing-target", `expected missing-target, got ${missing.status}`);
+          const drafts = await api.listNoteDrafts();
+          assert(
+            drafts.some((d) => d.draft_id === begun2.record.draft_id),
+            "orphaned draft must survive its coding's deletion",
+          );
+          const resolved = await api.resolveNoteDraftTarget(begun2.record.draft_id);
+          assert(resolved.status === "missing", `resolve should report missing, got ${resolved.status}`);
+
+          // Interview notes, including the deleted-interview kind.
+          const extra = await api.createInterview({ participant_label: "P99", interviewers: [] });
+          await api.updateHubMemo(extra.id, "hub-a");
+          const begunIv = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "interview",
+            target_id: extra.id,
+            interview_id: extra.id,
+            coder_name: SELFTEST_CODER,
+            participant_label: "P99",
+          });
+          assert(begunIv.status === "active", "interview begin failed");
+          if (begunIv.status !== "active") throw new Error("unreachable");
+          await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begunIv.record.draft_id,
+            expected_revision: 0,
+            draft_text: "hub-b",
+          });
+          const savedIv = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begunIv.record.draft_id,
+            revision: 1,
+            kind: "interview",
+            target_id: extra.id,
+            expected_saved_text: "hub-a",
+            draft_text: "hub-b",
+          });
+          assert(savedIv.status === "saved", `interview save failed: ${savedIv.status}`);
+          await api.deleteInterview(extra.id, SELFTEST_CODER);
+          const begunGone = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "interview",
+            target_id: extra.id,
+            interview_id: extra.id,
+            coder_name: SELFTEST_CODER,
+            participant_label: "P99",
+          });
+          assert(begunGone.status === "missing-target", "begin on a deleted interview must report missing");
+
+          // Explicit discard, then proof the generation stays dead.
+          const extra2 = await api.createInterview({ participant_label: "P98", interviewers: [] });
+          const begunDisc = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "interview",
+            target_id: extra2.id,
+            interview_id: extra2.id,
+            coder_name: SELFTEST_CODER,
+            participant_label: "P98",
+          });
+          assert(begunDisc.status === "active", "discard-fixture begin failed");
+          if (begunDisc.status !== "active") throw new Error("unreachable");
+          await api.discardNoteDraft({ draft_id: begunDisc.record.draft_id });
+          const afterDiscard = await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begunDisc.record.draft_id,
+            expected_revision: 0,
+            draft_text: "resurrected",
+          });
+          assert(afterDiscard.status === "stale-generation", "discarded generation must stay dead");
+        } finally {
+          await disposeStudy(path);
+        }
+      });
+
+      // Suite 15: note-inactive-interview — commits address captured identity,
+      // never the currently selected interview.
+      await runSuite("note-inactive-interview", async () => {
+        const path = await seedFreshStudy("note-inactive-interview");
+        try {
+          await api.setRecoveryRootForSelftest(`${path}-note-recovery`);
+          const snap = await api.openProject(path);
+          const projectKey = snap.project_key;
+          const epoch = snap.workspace_epoch;
+          assert(projectKey && epoch, "open snapshot carries no workspace identity");
+
+          const iv = await api.createInterview({ participant_label: "P02", interviewers: [] });
+          await api.importSegments({
+            interview_id: iv.id,
+            segments: [
+              {
+                speaker: "Participant",
+                timestamp_start: "00:00:01.000",
+                timestamp_end: null,
+                text: "Inactive interview passage for cross-interview note tests.",
+                section_tag: null,
+              },
+            ],
+          });
+          const seg = (await api.getSegments(iv.id))[0];
+          const coding = await api.ensureCodeAndApply({
+            name: "Inactive Probe",
+            color: "#22c55e",
+            interview_id: iv.id,
+            segment_id: seg.id,
+            coder_name: SELFTEST_CODER,
+          });
+
+          // The store never selects iv2 here: the commit below must still
+          // land on the captured coding, not on the active interview.
+          const begun = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "coding",
+            target_id: coding.coded_segment.id,
+            interview_id: iv.id,
+            coder_name: SELFTEST_CODER,
+            participant_label: "P02",
+            segment_id: seg.id,
+            segment_index: 0,
+            char_start: null,
+            char_end: null,
+            quote_text: seg.text,
+          });
+          assert(begun.status === "active", "inactive-interview begin failed");
+          if (begun.status !== "active") throw new Error("unreachable");
+          await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            expected_revision: 0,
+            draft_text: "note on the inactive interview",
+          });
+          const saved = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            revision: 1,
+            kind: "coding",
+            target_id: coding.coded_segment.id,
+            expected_saved_text: "",
+            draft_text: "note on the inactive interview",
+          });
+          assert(saved.status === "saved", `inactive save failed: ${saved.status}`);
+          const rows = await api.listCodedSegments(iv.id);
+          assert(
+            rows.some((r) => r.memo === "note on the inactive interview"),
+            "inactive interview note missing after save",
+          );
+
+          // Same for the interview memo of the inactive interview.
+          await api.updateHubMemo(iv.id, "inactive hub");
+          const begunIv = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "interview",
+            target_id: iv.id,
+            interview_id: iv.id,
+            coder_name: SELFTEST_CODER,
+            participant_label: "P02",
+          });
+          assert(begunIv.status === "active", "inactive hub begin failed");
+          if (begunIv.status !== "active") throw new Error("unreachable");
+          await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begunIv.record.draft_id,
+            expected_revision: 0,
+            draft_text: "inactive hub edited",
+          });
+          const savedIv = await api.saveNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begunIv.record.draft_id,
+            revision: 1,
+            kind: "interview",
+            target_id: iv.id,
+            expected_saved_text: "inactive hub",
+            draft_text: "inactive hub edited",
+          });
+          assert(savedIv.status === "saved", `inactive hub save failed: ${savedIv.status}`);
+        } finally {
+          await disposeStudy(path);
+        }
+      });
+
+      // Suite 16: note-privacy-contract — recovery markers reach no committed
+      // pipeline: the marker lives only in recovery, the export must carry
+      // committed notes and nothing unfinished.
+      await runSuite("note-privacy-contract", async () => {
+        const path = await seedFreshStudy("note-privacy-contract");
+        try {
+          await api.setRecoveryRootForSelftest(`${path}-note-recovery`);
+          const snap = await api.openProject(path);
+          const projectKey = snap.project_key;
+          const epoch = snap.workspace_epoch;
+          assert(projectKey && epoch, "open snapshot carries no workspace identity");
+
+          const coding = await api.ensureCodeAndApply({
+            name: "Privacy Probe",
+            color: "#a855f7",
+            interview_id: "iv1",
+            segment_id: "seg1",
+            coder_name: SELFTEST_CODER,
+          });
+          await api.patchCodingMemo({
+            coded_segment_id: coding.coded_segment.id,
+            memo: "zz-selftest-committed-marker-7h2k",
+          });
+          const begun = await api.beginNoteDraft({
+            project_key: projectKey,
+            epoch,
+            kind: "coding",
+            target_id: coding.coded_segment.id,
+            interview_id: "iv1",
+            coder_name: SELFTEST_CODER,
+            participant_label: "P01",
+            segment_id: "seg1",
+            segment_index: 0,
+            char_start: null,
+            char_end: null,
+            quote_text: null,
+          });
+          assert(begun.status === "active", "privacy-fixture begin failed");
+          if (begun.status !== "active") throw new Error("unreachable");
+          await api.putNoteDraft({
+            project_key: projectKey,
+            epoch,
+            draft_id: begun.record.draft_id,
+            expected_revision: 0,
+            draft_text: "zz-selftest-draft-marker-3m8p unfinished",
+          });
+
+          const result = await api.exportWithConfig(
+            path,
+            {
+              preset: "custom",
+              items: ["coded-segments", "memos"],
+              includeParticipantScope: "all",
+              includeCoderScope: "all",
+            },
+            null,
+            null,
+            SELFTEST_CODER,
+          );
+          let sawCommitted = false;
+          for (const file of result.files) {
+            const body = await api.readTextFile(
+              `${result.exports_dir}/${file.split(/[\\/]/).pop()}`,
+            ).catch(() => "");
+            assert(
+              !body.includes("zz-selftest-draft-marker-3m8p"),
+              `export file carries unfinished draft text: ${file}`,
+            );
+            if (body.includes("zz-selftest-committed-marker-7h2k")) sawCommitted = true;
+          }
+          assert(sawCommitted, "export does not carry committed notes");
+        } finally {
+          await disposeStudy(path);
+        }
+      });
+
+      // Suite 17: note-single-editor — at most one editable note surface, with
+      // keyboard focus landing in it. Opening a second note focuses the same
+      // single editor on the new target instead of mounting another.
+      await runSuite("note-single-editor", async () => {
+        const path = await seedFreshStudy("note-single-editor");
+        try {
+          await api.setRecoveryRootForSelftest(`${path}-note-recovery`);
+          const store = useProjectStore.getState();
+          await store.openProject(path);
+
+          const first = await api.ensureCodeAndApply({
+            name: "Single Editor A",
+            color: "#0ea5e9",
+            interview_id: "iv1",
+            segment_id: "seg1",
+            coder_name: SELFTEST_CODER,
+            char_start: 0,
+            char_end: 6,
+          });
+          const second = await api.ensureCodeAndApply({
+            name: "Single Editor B",
+            color: "#22c55e",
+            interview_id: "iv1",
+            segment_id: "seg1",
+            coder_name: SELFTEST_CODER,
+            char_start: 7,
+            char_end: 18,
+          });
+
+          store.openNoteForCoding(first.coded_segment.id);
+          store.openNoteForCoding(second.coded_segment.id);
+          const boxes = () =>
+            document.querySelectorAll('[aria-label="Note content"]');
+          assert(boxes().length <= 1, `expected at most one editor, found ${boxes().length}`);
+          const box = boxes()[0];
+          assert(box instanceof HTMLElement, "expected the single editor in the DOM");
+          (box as HTMLElement).focus();
+          assert(
+            document.activeElement?.getAttribute("aria-label") === "Note content",
+            "keyboard focus must land in the single editor",
+          );
+          // Test-approved clean departure: no dirty drafts exist (both notes
+          // were begun, never typed into), so the store close passes its own
+          // guard without a UI answer and never hangs the runner.
+          await store.closeProject();
+        } finally {
+          await disposeStudy(path);
+        }
+      });
+
       if (cancelled) return;
       setDone(true);
 

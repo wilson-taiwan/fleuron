@@ -34,6 +34,7 @@ mod lifecycle_harness;
 pub mod location;
 mod menu;
 mod models;
+pub mod note_recovery;
 pub mod open_marker;
 pub mod pdf;
 pub mod readiness;
@@ -245,6 +246,16 @@ pub fn run() {
             commands::delete_coded_segment,
             commands::list_coded_segments,
             commands::update_hub_memo,
+            commands::list_note_drafts,
+            commands::begin_note_draft,
+            commands::put_note_draft,
+            commands::discard_note_draft,
+            commands::save_note_draft,
+            commands::resolve_note_draft_target,
+            commands::note_recovery_status,
+            commands::set_recovery_root_for_selftest,
+            commands::approve_update_departure,
+            commands::complete_note_departure,
             commands::clear_workspace,
             commands::export_with_config,
             commands::consume_pending_open,
@@ -378,7 +389,60 @@ pub fn run() {
                     sync_coordinator::SyncTrigger::WindowFocused,
                 );
             }
-            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                // Native close guard: unapproved closes hold for the frontend
+                // draft preflight instead of checkpointing past unsaved work.
+                // Menu quit / Cmd+Q / Alt+F4 arrive as ExitRequested below;
+                // the window X button arrives here. Both funnel to the one
+                // typed choice controller in the frontend.
+                let state = app_handle.state::<AppState>();
+                if state.take_any_departure_approval().is_none() {
+                    let intent_id = state.request_native_departure("close");
+                    api.prevent_close();
+                    let _ = app_handle.emit(
+                        "notes://departure-requested",
+                        serde_json::json!({ "intent_id": intent_id, "kind": "close" }),
+                    );
+                } else {
+                    // Approved replay: fall through to normal close cleanup.
+                    let state = app_handle.state::<AppState>();
+                    state.checkpoint_open_project();
+                    if let Ok(p) = state.project_path_str() {
+                        open_marker::remove_marker(std::path::Path::new(&p));
+                    }
+                    if let Ok(app_dir) = app_data::app_data_dir(app_handle) {
+                        run_marker::remove_current_run_marker(&app_dir);
+                    }
+                }
+            }
+            RunEvent::ExitRequested { api, .. } => {
+                // Native quit guard: same preflight as window close. Forced OS
+                // termination (SIGKILL / RunEvent::Exit) cannot be held — it
+                // stays covered by acknowledged recovery writes only.
+                let state = app_handle.state::<AppState>();
+                if state.take_any_departure_approval().is_none() {
+                    let intent_id = state.request_native_departure("quit");
+                    api.prevent_exit();
+                    let _ = app_handle.emit(
+                        "notes://departure-requested",
+                        serde_json::json!({ "intent_id": intent_id, "kind": "quit" }),
+                    );
+                } else {
+                    let state = app_handle.state::<AppState>();
+                    state.checkpoint_open_project();
+                    if let Ok(p) = state.project_path_str() {
+                        open_marker::remove_marker(std::path::Path::new(&p));
+                    }
+                    if let Ok(app_dir) = app_data::app_data_dir(app_handle) {
+                        run_marker::remove_current_run_marker(&app_dir);
+                    }
+                }
+            }
+            RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
                 state.checkpoint_open_project();
                 if let Ok(p) = state.project_path_str() {

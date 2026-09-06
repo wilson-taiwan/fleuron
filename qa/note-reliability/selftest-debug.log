@@ -1,0 +1,2 @@
+[selftest] Launching binary: src-tauri/target/debug/Fleuron with --selftest (timeout: 90000ms)
+[run-selftest] ✅ Selftest passed

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0]
+
+### Fixed
+
+- **Truthful autosave and revision tracking:** Autosave now verifies target and revision acknowledgements before reporting saved, preventing false "Saved" confirmations on write failures and ensuring delayed saves never clear dirty state when newer edits are present.
+- **Passage-note draft retention:** Notes no longer discard uncommitted drafts on collapse, navigation, interview switching, or filter changes; returning or reopening restores active drafts without loss.
+- **Unified inline note editing:** Removed the competing side-rail note editor; all passage note creation and editing now converge on a single inline note editor docked beneath the quoted passage.
+- **Consolidated alert host:** Removed duplicate toast stack from the workspace layout, ensuring notifications render from a single region without overlapping banners.
+- **Code pill contrast and export copy:** Solid code labels use dynamic luminance contrast across both themes, and export dialog options replace technical format descriptions with clear, plain-language labels.
+
+### Added
+
+- **Private local draft crash recovery:** Unsaved passage notes and interview memos are backed up continuously to a private local SQLite recovery database (`note-recovery.sqlite3`), completely separated from project files, backups, exports, and sync payloads.
+- **Conflict comparison and orphan draft management:** When committed notes change beneath an active draft, a side-by-side comparison modal lets you choose which version to keep; drafts whose source coding was deleted are preserved in a local recovery drawer with Copy and Discard options.
+- **Guarded project departure and native exit:** Closing a project, quitting the app (including macOS Cmd+Q and Windows Alt+F4), and updater installation are intercepted with a Save all / Discard changes / Cancel dialog whenever unfinished drafts exist.
+- **Three-way export preflight:** Exporting with dirty drafts prompts with "Save all and export", "Export saved notes only", or "Cancel", ensuring all generated exports derive purely from committed study data.
+- **Streamlined transcript navigation:** Consolidated interview switching into a single selector in the reading header, with explicit "Back" and "Forward" history labels.
+
 ---
 
 ## [2.5.0]

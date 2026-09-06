@@ -109,6 +109,28 @@ export const USER_GUIDE_SECTIONS: GuideSection[] = [
     relatedSectionIds: ["getting-started", "troubleshooting"],
   },
   {
+    id: "working-with-notes",
+    category: "getting-started",
+    title: "Working with notes: inline editing, saving & recovery",
+    whenToUse: "Writing passage notes or interview memos, or finding unfinished work after a crash.",
+    steps: [
+      "One inline editor: Add or Edit a passage note from the note icon, the coding menu, or the selection bubble — every route opens the same editor docked below its source passage. There is only ever one open at a time.",
+      "Explicit save for passage notes: press Save & close (or Cmd/Ctrl+Enter). Collapsing the editor, pressing Escape, switching passage or interview, or filtering keeps the unfinished draft without asking; reopening restores it. Discard asks for confirmation when the draft is dirty.",
+      "Interview notes save automatically after a short typing pause. Saved means the current words are committed — a backup alone is never reported as saved.",
+      "Local recovery: while a draft is unsaved, Fleuron backs it up on this computer (Unfinished notes, in More actions). Recovery drafts stay on this computer and are not included in study backups or exports. Only backed-up drafts survive a crash — keystrokes still being typed when the app dies are not promised back.",
+      "If a note changed elsewhere while your draft was open, you get a side-by-side comparison: save your version, use the saved version, or keep editing. Nothing is overwritten until you choose.",
+      "If a note's coding or interview is deleted, the unfinished text stays in Unfinished notes with Copy and Discard — it is never recreated or merged anywhere automatically.",
+      "Leaving, closing, or exporting with unfinished notes asks first: Save all, Discard changes, or Cancel (exports offer Export saved notes only instead of discarding). A failed save blocks leaving until it succeeds or you cancel.",
+    ],
+    expectedResults: [
+      "No draft is ever lost to navigation, and no save is ever reported that did not happen.",
+    ],
+    commonMistakes: [
+      "Assuming a draft backed up locally is saved — only Save & close (passage notes) or the Saved indicator (interview notes) commits it.",
+    ],
+    relatedSectionIds: ["getting-started", "sync-with-your-coder", "troubleshooting"],
+  },
+  {
     id: "troubleshooting",
     category: "troubleshooting",
     title: "Troubleshooting: near-miss IDs, missing transcripts & conflicts",

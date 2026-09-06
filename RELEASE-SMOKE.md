@@ -8,10 +8,10 @@ release is not ready.
 > All evidence is redacted and synthetic: no real study data, participant text,
 > or account identifiers may be recorded here or in the release notes.
 
-- **Version:** 2.5.0
+- **Version:** 2.6.0
 - **Commit:** pending tag (see git log at release time)
 - **Platform / build:** macOS arm64 debug bundle (`Fleuron.app`, id `study.fleuron.desktop`); Windows unverified
-- **Date (last run):** 2026-09-04
+- **Date (last run):** 2026-09-06
 - **Verifier:** implementation agent (source + local stack + packaged-app selftest); **Wilson for every Windows row**
 
 ## 1. Offline / accountless local path

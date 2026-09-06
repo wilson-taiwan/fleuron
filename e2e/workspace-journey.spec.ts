@@ -104,7 +104,9 @@ test("codebook filters passages and passage notes open inline", async ({ page })
   await expect(inlineBox).toBeVisible();
   await inlineBox.fill("Updated from the inline note.");
   await passages.getByRole("button", { name: "Save & close" }).click();
+  // Inline passage notes commit through the checked write contract, not the
+  // legacy memo command.
   await expect
-    .poll(() => ipcCount(page, "patch_coding_memo"), { timeout: 15_000 })
+    .poll(() => ipcCount(page, "save_note_draft"), { timeout: 15_000 })
     .toBeGreaterThan(0);
 });
