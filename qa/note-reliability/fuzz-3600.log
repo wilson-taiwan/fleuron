@@ -34,7 +34,7 @@
    Compiling tauri-plugin-single-instance v2.4.3
    Compiling tauri-plugin-updater v2.10.1
    Compiling tauri-plugin-dialog v2.7.1
-   Compiling qualitative-coding-app v2.5.0 (/Users/wilsonyeh/Developer/codemap/src-tauri)
+   Compiling qualitative-coding-app v2.5.0 (src-tauri)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 28.11s
      Running unittests src/lib.rs (src-tauri/target/debug/deps/qualitative_coding_app_lib-6ee6542b009ab459)
 

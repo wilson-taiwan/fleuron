@@ -3,7 +3,7 @@
 No real study data, participant text, or account identifiers are recorded here.
 All projects referenced are synthetic (`seedFreshStudy`, browser dev-mock mirror).
 
-Date: 2026-09-06 (UTC). Repo: `/Users/wilsonyeh/Developer/codemap`, base `192ac24` v2.5.0, working tree uncommitted (no commit/tag/push per plan).
+Date: 2026-09-06 (UTC). Repo: `fleuron`, base `192ac24` v2.5.0, working tree uncommitted (no commit/tag/push per plan).
 
 ## Gate results (verbatim commands, from repo root)
 
