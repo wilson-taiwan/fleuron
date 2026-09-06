@@ -505,6 +505,57 @@ pub fn count_active_drafts_for_project(
     .map_err(|e| e.to_string())
 }
 
+pub fn list_active_drafts_for_project(
+    conn: &Connection,
+    project_key: &str,
+) -> Result<Vec<NoteDraftRecord>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {DRAFT_COLUMNS}, recovery_projects.title AS project_title
+             FROM note_drafts
+             LEFT JOIN recovery_projects USING (project_key)
+             WHERE project_key = ?1 AND discarded = 0
+             ORDER BY updated_at DESC, draft_id DESC"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_key], map_draft_row)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+pub fn restore_draft_record(conn: &Connection, draft: &NoteDraftRecord) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO note_drafts (
+            draft_id, project_key, kind, target_id, interview_id, coder_name,
+            base_text, draft_text, revision, participant_label, segment_id,
+            segment_index, char_start, char_end, quote_text, updated_at, discarded
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)",
+        params![
+            draft.draft_id,
+            draft.project_key,
+            draft.kind,
+            draft.target_id,
+            draft.interview_id,
+            draft.coder_name,
+            draft.base_text,
+            draft.draft_text,
+            draft.revision,
+            draft.participant_label,
+            draft.segment_id,
+            draft.segment_index,
+            draft.char_start,
+            draft.char_end,
+            draft.quote_text,
+            draft.updated_at,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Resolve a recovery record against the currently open project database.
 /// Returns live target/context or a missing reason. Never infers deletion
 /// from the loaded interview or active filters: the project database is

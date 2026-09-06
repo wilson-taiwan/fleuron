@@ -40,3 +40,17 @@ export async function pickProjectPath(): Promise<string | null> {
       });
   return picked ? (picked as string) : null;
 }
+
+export const BACKUP_EXTENSIONS = ["fleuronbak", "codemapbak"] as const;
+
+export async function pickBackupPath(): Promise<string | null> {
+  const picked = await open({
+    multiple: false,
+    title: "Restore a study backup",
+    filters: [
+      { name: "Fleuron Backup", extensions: [...BACKUP_EXTENSIONS] },
+    ],
+  });
+  return picked ? (picked as string) : null;
+}
+

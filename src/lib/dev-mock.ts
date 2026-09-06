@@ -968,6 +968,20 @@ async function handle(cmd: string, args: Record<string, unknown>): Promise<unkno
         safety_backup_path: "/fake/backups/fleuron-pre-restore.fleuronbak",
       };
 
+    case "save_local_copy":
+      return {
+        path: `${args?.destinationDir ?? "/fake/backups"}/copy.fleuronbak`,
+        timestamp: new Date().toISOString(),
+        size_bytes: 1024,
+        segment_count: segments.length,
+        code_count: codes.length,
+        coded_segment_count: 5,
+        memo_count: 2,
+      };
+
+    case "restore_study_backup":
+      return `/fake/projects/restored-${Date.now()}`;
+
     case "list_codes":
       return codes.filter((c) => !c.is_retired);
     case "list_retired_codes":
@@ -1213,6 +1227,52 @@ async function handle(cmd: string, args: Record<string, unknown>): Promise<unkno
     }
     case "restore_segment_speakers": {
       const changes = (args.changes as SegmentSpeakerChange[]) || [];
+      for (const change of changes) {
+        const seg = segments.find((s) => s.id === change.segment_id);
+        if (seg) {
+          seg.speaker = change.old_speaker;
+        }
+      }
+      return null;
+    }
+    case "get_interview_speakers": {
+      const interviewId = (args.interviewId ?? args.interview_id) as string;
+      const ivSegments = segments.filter((s) => s.interview_id === interviewId);
+      const speakerCounts = new Map<string, number>();
+      for (const seg of ivSegments) {
+        const spk = seg.speaker.trim() || "Unknown";
+        speakerCounts.set(spk, (speakerCounts.get(spk) ?? 0) + 1);
+      }
+      return Array.from(speakerCounts.entries()).map(([speaker, turn_count]) => ({
+        speaker,
+        turn_count,
+      }));
+    }
+    case "rename_interview_speaker": {
+      const input = (args.input ?? args) as {
+        interview_id: string;
+        old_speaker: string;
+        new_speaker: string;
+        expected_count?: number;
+      };
+      const changes: SegmentSpeakerChange[] = [];
+      for (const s of segments) {
+        if (s.interview_id === input.interview_id && s.speaker === input.old_speaker) {
+          changes.push({
+            segment_id: s.id,
+            old_speaker: input.old_speaker,
+            new_speaker: input.new_speaker,
+          });
+          s.speaker = input.new_speaker;
+        }
+      }
+      return changes;
+    }
+    case "undo_rename_interview_speaker": {
+      const input = (args.input ?? args) as {
+        changes: SegmentSpeakerChange[];
+      };
+      const changes = input.changes || [];
       for (const change of changes) {
         const seg = segments.find((s) => s.id === change.segment_id);
         if (seg) {

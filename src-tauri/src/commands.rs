@@ -58,7 +58,7 @@ pub struct AppState {
     pub(crate) pending_departure: Mutex<Option<PendingDeparture>>,
     /// One-use approval consumed when replaying an approved native action,
     /// so the replay does not prompt recursively.
-    pub(crate) departure_approved: Mutex<Option<String>>,
+    pub(crate) departure_approved: Mutex<Option<ApprovedDeparture>>,
     /// One-use updater approval minted after the draft preflight.
     pub(crate) update_departure_approval: Mutex<Option<StoredUpdateApproval>>,
     /// The live sync session for this run of the app.
@@ -138,6 +138,12 @@ impl PendingOpen {
 /// the user never saw, and a timeout auto-cancelling it would swallow quits.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDeparture {
+    pub(crate) intent_id: String,
+    pub(crate) kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovedDeparture {
     pub(crate) intent_id: String,
     pub(crate) kind: String,
 }
@@ -515,16 +521,36 @@ impl AppState {
         intent_id
     }
 
-    /// Consume whatever replay approval is present, for native-event replays
-    /// that do not carry the intent id back (window close / process exit).
-    /// Approvals are minted only by `complete_note_departure` immediately
-    /// before replaying, so a present approval always belongs to the action
-    /// being replayed.
+    /// Consume a replay approval matching the expected action kind (close vs quit),
+    /// ensuring a window close cannot approve process exit.
+    pub(crate) fn take_departure_approval(&self, expected_kind: &str) -> Option<String> {
+        let mut guard = self.departure_approved.lock().ok()?;
+        if let Some(ref approved) = *guard {
+            if approved.kind == expected_kind {
+                return guard.take().map(|a| a.intent_id);
+            }
+        }
+        None
+    }
+
+    /// Backwards-compatible consumption for tests.
+    #[allow(dead_code)]
     pub(crate) fn take_any_departure_approval(&self) -> Option<String> {
         self.departure_approved
             .lock()
             .ok()
-            .and_then(|mut guard| guard.take())
+            .and_then(|mut guard| guard.take().map(|a| a.intent_id))
+    }
+
+    /// Clear any pending departure intent and approved departure.
+    #[allow(dead_code)]
+    pub(crate) fn clear_departure_state(&self) {
+        if let Ok(mut g) = self.pending_departure.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.departure_approved.lock() {
+            *g = None;
+        }
     }
 }
 
@@ -619,6 +645,29 @@ pub async fn open_project(
                 )
             })?;
 
+    // Validate candidate database before swapping state
+    let is_bound = sync::is_bound(&conn).unwrap_or(false);
+    let group_id = sync::get_state(&conn, sync::KEY_PROJECT_ID).ok().flatten();
+    if is_bound {
+        if let Some(ref gid) = group_id {
+            if let Ok(recents) = crate::app_data::list_recent_projects(&app) {
+                for r in recents {
+                    if r.group_id.as_ref() == Some(gid)
+                        && r.path != path
+                        && Path::new(&r.path).exists()
+                    {
+                        return Err(format!("TWO_FOLDERS_ONE_GROUP|{}|{}", r.path, gid));
+                    }
+                }
+            }
+        }
+    }
+
+    // Stop and drain previous project sync before replacing connection
+    state.sync_coordinator.cancel();
+    state.realtime.stop(&app);
+    state.checkpoint_open_project();
+
     *state.project_path.lock().map_err(|e| e.to_string())? = Some(PathBuf::from(&path));
     *state.db.lock().map_err(|e| e.to_string())? = Some(conn);
 
@@ -637,28 +686,6 @@ pub async fn open_project(
             // editing continues in memory with the persistent warning raised
             // by with_recovery on first draft use.
             let _ = error;
-        }
-    }
-    // Task 10(c): Two folders, one group guard
-    let group_id = state
-        .with_conn(|conn| sync::get_state(conn, sync::KEY_PROJECT_ID).map_err(|e| e.to_string()))
-        .ok()
-        .flatten();
-    let is_bound = state
-        .with_conn(|conn| sync::is_bound(conn).map_err(|e| e.to_string()))
-        .unwrap_or(false);
-    if is_bound {
-        if let Some(ref gid) = group_id {
-            if let Ok(recents) = crate::app_data::list_recent_projects(&app) {
-                for r in recents {
-                    if r.group_id.as_ref() == Some(gid)
-                        && r.path != path
-                        && Path::new(&r.path).exists()
-                    {
-                        return Err(format!("TWO_FOLDERS_ONE_GROUP|{}|{}", r.path, gid));
-                    }
-                }
-            }
         }
     }
 
@@ -825,6 +852,79 @@ pub fn import_backup(
 ) -> Result<backup::BackupInfo, String> {
     let project_path = PathBuf::from(state.project_path_str()?);
     backup::import(&project_path, std::path::Path::new(&source_path))
+}
+
+/// Save a local verified recovery archive of a study outside its project directory.
+#[tauri::command]
+pub fn save_local_copy(
+    state: State<'_, AppState>,
+    source_path: String,
+    destination_dir: String,
+    include_external_media: bool,
+) -> Result<backup::BackupInfo, String> {
+    let source = Path::new(&source_path);
+    let dest = Path::new(&destination_dir);
+
+    let recovery_guard = state.recovery_db.lock().ok();
+    let recovery_conn = recovery_guard.as_ref().and_then(|g| g.as_ref());
+
+    let is_current = if let Ok(current) = state.project_path_str() {
+        let current_path = Path::new(&current);
+        current_path == source
+            || current_path
+                .canonicalize()
+                .ok()
+                .zip(source.canonicalize().ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if is_current {
+        state.with_conn(|conn| {
+            backup::save_local_copy(conn, source, dest, include_external_media, recovery_conn)
+        })
+    } else {
+        let db_path = source.join("project.db");
+        if !db_path.exists() {
+            return Err("Not a valid Fleuron project database".into());
+        }
+        let conn = Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| e.to_string())?;
+        backup::save_local_copy(&conn, source, dest, include_external_media, recovery_conn)
+    }
+}
+
+/// Restore a study backup to a newly allocated project folder.
+#[tauri::command]
+pub fn restore_study_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    archive_path: String,
+    parent_dir: Option<String>,
+    target_title: Option<String>,
+) -> Result<String, String> {
+    let default_parent = if let Some(p) = parent_dir {
+        PathBuf::from(p)
+    } else {
+        crate::app_data::projects_library_dir(&app).unwrap_or_else(|_| PathBuf::from("."))
+    };
+
+    let recovery_guard = state.recovery_db.lock().ok();
+    let recovery_conn = recovery_guard.as_ref().and_then(|g| g.as_ref());
+
+    let restored_path = backup::restore_backup_to_new_project(
+        Path::new(&archive_path),
+        &default_parent,
+        target_title.as_deref(),
+        recovery_conn,
+    )?;
+
+    Ok(restored_path.to_string_lossy().to_string())
 }
 
 /// Coding pulled from a colleague that is still waiting for its transcript.
@@ -1121,6 +1221,57 @@ pub fn restore_segment_speakers(
     changes: Vec<SegmentSpeakerChange>,
 ) -> Result<(), String> {
     state.with_conn(|conn| db::restore_segment_speakers(conn, &changes).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub fn get_interview_speakers(
+    state: State<'_, AppState>,
+    interview_id: String,
+) -> Result<Vec<crate::models::InterviewSpeakerSummary>, String> {
+    state.with_conn(|conn| {
+        db::get_interview_speakers(conn, &interview_id).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+pub fn rename_interview_speaker(
+    state: State<'_, AppState>,
+    input: crate::models::RenameInterviewSpeakerInput,
+) -> Result<Vec<SegmentSpeakerChange>, String> {
+    let _transition = state
+        .workspace_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if let (Some(k), Some(e)) = (&input.project_key, &input.epoch) {
+        state.check_workspace_under_transition(k, e)?;
+    }
+    state.with_conn(|conn| {
+        db::rename_interview_speaker(
+            conn,
+            &input.interview_id,
+            &input.old_speaker,
+            &input.new_speaker,
+            input.expected_count,
+        )
+        .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+pub fn undo_rename_interview_speaker(
+    state: State<'_, AppState>,
+    input: crate::models::UndoRenameInterviewSpeakerInput,
+) -> Result<(), String> {
+    let _transition = state
+        .workspace_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if let (Some(k), Some(e)) = (&input.project_key, &input.epoch) {
+        state.check_workspace_under_transition(k, e)?;
+    }
+    state.with_conn(|conn| {
+        db::restore_segment_speakers(conn, &input.changes).map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -1539,12 +1690,16 @@ pub fn complete_note_departure(
     };
     *state.pending_departure.lock().map_err(|e| e.to_string())? = None;
     if !approved {
+        *state.departure_approved.lock().map_err(|e| e.to_string())? = None;
         return Ok(DepartureCompletion {
             intent_id,
             replayed: "cancelled".into(),
         });
     }
-    *state.departure_approved.lock().map_err(|e| e.to_string())? = Some(intent_id.clone());
+    *state.departure_approved.lock().map_err(|e| e.to_string())? = Some(ApprovedDeparture {
+        intent_id: intent_id.clone(),
+        kind: pending.kind.clone(),
+    });
     if pending.kind == "quit" {
         app.exit(0);
         Ok(DepartureCompletion {
@@ -1552,13 +1707,26 @@ pub fn complete_note_departure(
             replayed: "quit".into(),
         })
     } else {
-        if let Some(window) = app.get_webview_window("main") {
-            window.close().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            Ok(DepartureCompletion {
+                intent_id,
+                replayed: "hide".into(),
+            })
         }
-        Ok(DepartureCompletion {
-            intent_id,
-            replayed: "close".into(),
-        })
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Some(window) = app.get_webview_window("main") {
+                window.close().map_err(|e| e.to_string())?;
+            }
+            Ok(DepartureCompletion {
+                intent_id,
+                replayed: "close".into(),
+            })
+        }
     }
 }
 
@@ -3463,12 +3631,37 @@ pub async fn sync_reconcile_pending_unbind(
 }
 
 #[tauri::command]
-pub fn project_deletion_summary(path: String) -> Result<ProjectDeletionSummary, String> {
-    db::get_project_deletion_summary(&path)
+pub fn project_deletion_summary(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ProjectDeletionSummary, String> {
+    let recovery_guard = state.recovery_db.lock().ok();
+    let recovery_conn = recovery_guard.as_ref().and_then(|g| g.as_ref());
+    db::get_project_deletion_summary_with_recovery(&path, recovery_conn)
 }
 
 #[tauri::command]
-pub fn delete_project_folder(path: String) -> Result<(), String> {
+pub fn delete_project_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let target = Path::new(&path);
+    let is_current = if let Ok(current) = state.project_path_str() {
+        let current_path = Path::new(&current);
+        current_path == target
+            || current_path
+                .canonicalize()
+                .ok()
+                .zip(target.canonicalize().ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false)
+    } else {
+        false
+    };
+    if is_current {
+        close_project(app, state)?;
+    }
     db::delete_project_folder_impl(&path)
 }
 

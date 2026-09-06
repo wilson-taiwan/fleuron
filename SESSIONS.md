@@ -33,3 +33,15 @@ focused polish). Prior sessions had built the feature tree; this session:
   Windows close/Alt+F4 rows, real updater install, forced-kill crash test,
   `RELEASE-SMOKE.md` untouched, `verify-release-smoke.mjs --final` not run.
 - Version bumped to 2.6.0 across manifests and docs; release commit and tag v2.6.0 pushed.
+
+## 2026-09-06 — Fleuron 2.7.0: Study lifecycle, guided setup, speaker management
+
+Implemented HQ plan `fleuron-project-lifecycle.md` across Tauri Rust core, React frontend, and production Supabase backend:
+
+- Guided setup flow: 4-step wizard with non-blocking "Finish setup later" and journal persistence in study file.
+- Whole-interview speaker management: "Manage Speakers" modal with turn/coded stats, full-interview renames, and merges with rollback.
+- Trash-only deletion & lifecycle safety: removed hard unlinks; delete moves study to OS Trash/Recycle Bin; guarded sole-member leave and multi-member deletion.
+- Applied Supabase migration `20260906000000_study_lifecycle_guards.sql` to production database.
+- Fixed macOS dock reopen behavior when all windows are closed.
+- Version bumped to 2.7.0 across manifests, lockfiles, release smoke, and trust documentation.
+

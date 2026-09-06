@@ -77,6 +77,14 @@ fn deliver_open_project(app: &tauri::AppHandle, path: &str) {
         return;
     }
 
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        window_guard::clamp_main_window_to_work_area(app);
+    }
+
     // Canonicalize separators so a Windows path with mixed slashes normalises
     // before it reaches state or the frontend.
     let path: String = std::path::Path::new(path)
@@ -228,6 +236,8 @@ pub fn run() {
             commands::delete_backup,
             commands::inspect_backup,
             commands::import_backup,
+            commands::save_local_copy,
+            commands::restore_study_backup,
             commands::pending_coded_count,
             commands::list_interviews,
             commands::create_interview,
@@ -238,6 +248,9 @@ pub fn run() {
             commands::get_segments,
             commands::set_segment_speaker,
             commands::restore_segment_speakers,
+            commands::get_interview_speakers,
+            commands::rename_interview_speaker,
+            commands::undo_rename_interview_speaker,
             commands::set_segment_reviewed,
             commands::list_segment_reviews,
             commands::apply_codes,
@@ -394,29 +407,47 @@ pub fn run() {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } if label == "main" => {
-                // Native close guard: unapproved closes hold for the frontend
-                // draft preflight instead of checkpointing past unsaved work.
-                // Menu quit / Cmd+Q / Alt+F4 arrive as ExitRequested below;
-                // the window X button arrives here. Both funnel to the one
-                // typed choice controller in the frontend.
-                let state = app_handle.state::<AppState>();
-                if state.take_any_departure_approval().is_none() {
-                    let intent_id = state.request_native_departure("close");
+                #[cfg(target_os = "macos")]
+                {
+                    // macOS red-button close keeps Fleuron running and preserves
+                    // the current study/work in memory; Dock activation restores it.
                     api.prevent_close();
-                    let _ = app_handle.emit(
-                        "notes://departure-requested",
-                        serde_json::json!({ "intent_id": intent_id, "kind": "close" }),
-                    );
-                } else {
-                    // Approved replay: fall through to normal close cleanup.
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Native close guard: unapproved closes hold for the frontend
+                    // draft preflight instead of checkpointing past unsaved work.
                     let state = app_handle.state::<AppState>();
-                    state.checkpoint_open_project();
-                    if let Ok(p) = state.project_path_str() {
-                        open_marker::remove_marker(std::path::Path::new(&p));
+                    if state.take_departure_approval("close").is_none() {
+                        let intent_id = state.request_native_departure("close");
+                        api.prevent_close();
+                        let _ = app_handle.emit(
+                            "notes://departure-requested",
+                            serde_json::json!({ "intent_id": intent_id, "kind": "close" }),
+                        );
+                    } else {
+                        // Approved replay: fall through to normal close cleanup.
+                        let state = app_handle.state::<AppState>();
+                        state.checkpoint_open_project();
+                        if let Ok(p) = state.project_path_str() {
+                            open_marker::remove_marker(std::path::Path::new(&p));
+                        }
+                        if let Ok(app_dir) = app_data::app_data_dir(app_handle) {
+                            run_marker::remove_current_run_marker(&app_dir);
+                        }
                     }
-                    if let Ok(app_dir) = app_data::app_data_dir(app_handle) {
-                        run_marker::remove_current_run_marker(&app_dir);
-                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                    window_guard::clamp_main_window_to_work_area(app_handle);
                 }
             }
             RunEvent::ExitRequested { api, .. } => {
@@ -424,9 +455,16 @@ pub fn run() {
                 // termination (SIGKILL / RunEvent::Exit) cannot be held — it
                 // stays covered by acknowledged recovery writes only.
                 let state = app_handle.state::<AppState>();
-                if state.take_any_departure_approval().is_none() {
+                if state.take_departure_approval("quit").is_none() {
                     let intent_id = state.request_native_departure("quit");
                     api.prevent_exit();
+                    #[cfg(target_os = "macos")]
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                        window_guard::clamp_main_window_to_work_area(app_handle);
+                    }
                     let _ = app_handle.emit(
                         "notes://departure-requested",
                         serde_json::json!({ "intent_id": intent_id, "kind": "quit" }),

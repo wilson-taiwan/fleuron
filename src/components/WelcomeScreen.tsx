@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { pickProjectPath } from "../lib/open-project";
+import { pickProjectPath, pickBackupPath } from "../lib/open-project";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useStudyLifecycleStore } from "../store/study-lifecycle-store";
+import { getDefaultRemovalMode } from "../lib/study-lifecycle";
 import { useGuideStore } from "../store/guide-store";
 import { useAppStore, onboardingChoiceSeen } from "../store/app-store";
 import { useProjectStore } from "../store/project-store";
@@ -17,7 +20,12 @@ import {
 } from "../lib/home-rows";
 import { VOCABULARY } from "../lib/collab-vocabulary";
 import { appConfirm } from "../store/confirm-store";
-import type { LeftStudy, MembershipSummary, RecentProject } from "../lib/types";
+import type {
+  LeftStudy,
+  MembershipSummary,
+  RecentProject,
+  ProjectDeletionSummary,
+} from "../lib/types";
 import { Icon, type IconName } from "./ui/Icon";
 import { Modal } from "./ui/Surfaces";
 import { useUnfinishedNotesCount } from "./NoteRecoveryPanel";
@@ -25,6 +33,7 @@ import { ContextMenuHost, openContextMenu } from "./ui/ContextMenu";
 import { AccountForm } from "./AccountForm";
 import { CollaborationDisclosure } from "./CollaborationDisclosure";
 import { UpdateAction } from "./UpdateAction";
+import { FleuronMark } from "./ui/FleuronMark";
 
 export function WelcomeScreen() {
   const { openProject, loading, error } = useProjectStore(
@@ -84,17 +93,14 @@ export function WelcomeScreen() {
       isRemoteOnly?: boolean;
       members?: string[];
     };
-    summary?: {
-      interview_count: number;
-      coded_segment_count: number;
-      memo_count: number;
-    } | null;
+    summary?: ProjectDeletionSummary | null;
     mode: "detach" | "leave" | "delete_group" | "delete_solo";
     alsoDeleteFolder: boolean;
     confirmTitleInput: string;
     isSoleMember?: boolean;
   } | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [savedCopyMessage, setSavedCopyMessage] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     // 1. First paint from cache and local recents
@@ -148,6 +154,22 @@ export function WelcomeScreen() {
       }
     } catch (e) {
       setRecentError(String(e));
+    }
+  }
+
+  async function handleRestoreBackup() {
+    setRecentError(null);
+    try {
+      const archivePath = await pickBackupPath();
+      if (!archivePath) return;
+      const res = await useStudyLifecycleStore.getState().restoreStudyBackup(archivePath);
+      if (res.status === "completed" && res.data) {
+        await openProject(res.data);
+      } else if (res.status === "failed") {
+        setRecentError(res.problem?.message || "Could not restore study backup.");
+      }
+    } catch (err) {
+      setRecentError(`Could not restore study backup — ${String(err)}`);
     }
   }
 
@@ -297,11 +319,7 @@ export function WelcomeScreen() {
     },
     initialMode?: "detach" | "leave" | "delete_group" | "delete_solo",
   ) {
-    let summary: {
-      interview_count: number;
-      coded_segment_count: number;
-      memo_count: number;
-    } | null = null;
+    let summary: ProjectDeletionSummary | null = null;
 
     if (target.path) {
       try {
@@ -311,16 +329,10 @@ export function WelcomeScreen() {
       }
     }
 
-    const defaultMode: "detach" | "leave" | "delete_group" | "delete_solo" =
-      initialMode ??
-      (!target.isBound
-        ? "delete_solo"
-        : target.isRemoteOnly
-          ? "leave"
-          : "detach");
-
     const isSoleMember = target.members ? target.members.length <= 1 : false;
+    const defaultMode = getDefaultRemovalMode(target, initialMode);
 
+    setSavedCopyMessage(null);
     setRemovalState({
       target: {
         ...target,
@@ -339,38 +351,73 @@ export function WelcomeScreen() {
     const { target, mode, alsoDeleteFolder, confirmTitleInput, isSoleMember } = removalState;
     setActionBusy(true);
     try {
-      if (mode === "delete_solo") {
-        if (target.path) {
-          await api.deleteProjectFolder(target.path);
-          setRecents(await api.removeRecentProject(target.path));
-        }
-      } else if (mode === "detach") {
-        await api.syncDetachLocal(target.projectId);
-      } else if (mode === "leave") {
-        if (isSoleMember && confirmTitleInput.trim() !== target.title.trim()) {
-          throw new Error("Confirmation title does not match.");
-        }
-        await api.syncLeaveGroup(target.projectId);
-        if (alsoDeleteFolder && target.path) {
-          await api.deleteProjectFolder(target.path);
-          setRecents(await api.removeRecentProject(target.path));
-        }
-      } else if (mode === "delete_group") {
+      if (mode === "leave" && isSoleMember) {
+        throw new Error(
+          "Cannot leave study as the sole member. Stop syncing locally or delete the group instead.",
+        );
+      }
+      if (mode === "delete_group") {
         if (confirmTitleInput.trim() !== target.title.trim()) {
           throw new Error("Confirmation title does not match.");
         }
-        await api.syncDeleteGroup(target.title, target.projectId);
-        if (alsoDeleteFolder && target.path) {
-          await api.deleteProjectFolder(target.path);
-          setRecents(await api.removeRecentProject(target.path));
-        }
       }
-      setRemovalState(null);
-      await loadData();
+
+      const result = await useStudyLifecycleStore.getState().removeStudy({
+        mode,
+        path: target.path,
+        projectId: target.projectId,
+        title: target.title,
+        alsoDeleteFolder,
+      });
+
+      if (result.status === "completed") {
+        setRemovalState(null);
+        await loadData();
+      } else if (result.status === "cancelled") {
+        return;
+      } else if (result.status === "remote-outcome-unknown") {
+        setRemovalState(null);
+        setRecentError(
+          result.problem?.message ||
+            "Study removal outcome is unknown. Please check your network connection.",
+        );
+        await loadData();
+      } else if (result.status === "partial") {
+        setRemovalState(null);
+        setRecentError(
+          result.problem?.message ||
+            "Study removed from server, but local folder cleanup could not be completed.",
+        );
+        await loadData();
+      } else {
+        setRecentError(result.problem?.message || "Could not remove study.");
+      }
     } catch (e) {
       setRecentError(`Could not remove study — ${String(e)}`);
     } finally {
       setActionBusy(false);
+    }
+  }
+
+  async function handleSaveLocalCopy() {
+    if (!removalState?.target.path) return;
+    try {
+      const destDir = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose folder to save backup copy",
+      });
+      if (!destDir || typeof destDir !== "string") return;
+      const res = await useStudyLifecycleStore
+        .getState()
+        .saveLocalCopy(removalState.target.path, destDir);
+      if (res.status === "completed") {
+        setSavedCopyMessage("Backup copy saved successfully.");
+      } else if (res.status === "failed") {
+        setRecentError(res.problem?.message || "Could not save backup copy.");
+      }
+    } catch (err) {
+      setRecentError(`Could not save local copy — ${String(err)}`);
     }
   }
 
@@ -419,7 +466,7 @@ export function WelcomeScreen() {
         <div className="scroll flex flex-1 flex-col px-6 py-10">
           <div className="mx-auto my-auto flex w-full max-w-md flex-col items-center py-6">
             <header className="anim-rise flex flex-col items-center text-center">
-              <Mark />
+              <FleuronMark size={72} />
               <h1 className="wordmark mt-4 text-[28px]">Welcome to Fleuron</h1>
               <p className="hint mt-2 max-w-sm text-[13px]">
                 How do you want to work? You can change your mind at any time.
@@ -613,7 +660,7 @@ export function WelcomeScreen() {
       <div className="scroll flex flex-1 flex-col px-6 pb-10">
         <div className="mx-auto my-auto flex w-full max-w-lg flex-col items-center py-6">
           <header className="anim-rise flex flex-col items-center text-center">
-            <Mark />
+            <FleuronMark size={72} />
             <h1 className="wordmark mt-4 text-[32px]">Fleuron</h1>
             <p className="hint mt-2 max-w-sm text-[13px]">
               Code interview transcripts with a living codebook, and export
@@ -667,6 +714,13 @@ export function WelcomeScreen() {
                 title="Open an existing study"
                 subtitle="A .fleuron or .qcproj folder on this computer"
               />
+              <HomeCard
+                icon="import"
+                disabled={loading}
+                onClick={handleRestoreBackup}
+                title="Restore a study backup"
+                subtitle="Restore a .fleuronbak or .codemapbak archive"
+              />
             </div>
           ) : (
             /* Non-empty state: Compact actions row + single unified Studies section (Task 12) */
@@ -699,6 +753,15 @@ export function WelcomeScreen() {
                 >
                   <Icon name="people" size={13} />
                   Join with a key
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRestoreBackup}
+                  disabled={loading}
+                  className="btn btn-outline btn-sm gap-1.5"
+                >
+                  <Icon name="import" size={13} />
+                  Restore backup
                 </button>
                 {unfinishedCount > 0 && (
                   <button
@@ -1083,6 +1146,27 @@ export function WelcomeScreen() {
                                     ),
                                   destructive: true,
                                 },
+                                ...(row.role === "admin"
+                                  ? [
+                                      {
+                                        label: `${VOCABULARY.DELETE_GROUP_FOR_EVERYONE}…`,
+                                        icon: "trash" as const,
+                                        onSelect: () =>
+                                          requestRemoveStudy(
+                                            {
+                                              title: row.title,
+                                              projectId: row.projectId,
+                                              isBound: true,
+                                              isAdmin: true,
+                                              isRemoteOnly: true,
+                                              members: row.members,
+                                            },
+                                            "delete_group",
+                                          ),
+                                        destructive: true,
+                                      },
+                                    ]
+                                  : []),
                               ])
                             }
                             className="flex items-center justify-between gap-3 rounded-[14px] border border-[var(--border)] bg-[var(--surface)] p-3.5 transition-all"
@@ -1186,7 +1270,7 @@ export function WelcomeScreen() {
                 removalState.mode === "delete_solo"
                   ? `Delete "${removalState.target.title}" from this computer?`
                   : removalState.target.isRemoteOnly
-                    ? `Leave "${removalState.target.title}"?`
+                    ? `Remove shared study "${removalState.target.title}"`
                     : `Remove study "${removalState.target.title}"`
               }
               subtitle={
@@ -1211,8 +1295,8 @@ export function WelcomeScreen() {
                     onClick={confirmRemoval}
                     disabled={
                       actionBusy ||
-                      ((removalState.mode === "delete_group" ||
-                        (removalState.mode === "leave" && removalState.isSoleMember)) &&
+                      (removalState.mode === "leave" && removalState.isSoleMember) ||
+                      (removalState.mode === "delete_group" &&
                         removalState.confirmTitleInput.trim() !==
                           removalState.target.title.trim())
                     }
@@ -1230,7 +1314,7 @@ export function WelcomeScreen() {
                           ? VOCABULARY.STOP_SYNCING_LOCAL
                           : removalState.mode === "leave"
                             ? removalState.alsoDeleteFolder
-                              ? "Leave and delete folder"
+                              ? "Leave and move folder to Trash"
                               : VOCABULARY.LEAVE_GROUP
                             : VOCABULARY.DELETE_GROUP_FOR_EVERYONE}
                   </button>
@@ -1238,6 +1322,18 @@ export function WelcomeScreen() {
               }
             >
               <div className="space-y-4 text-[13px]">
+                {savedCopyMessage && (
+                  <div
+                    className="rounded-lg p-2.5 text-[12px] font-medium"
+                    style={{
+                      background: "var(--ok-soft, #d1fae5)",
+                      color: "var(--ok, #065f46)",
+                    }}
+                  >
+                    {savedCopyMessage}
+                  </div>
+                )}
+
                 {/* Solo delete view */}
                 {removalState.mode === "delete_solo" && (
                   <div className="space-y-3">
@@ -1264,36 +1360,50 @@ export function WelcomeScreen() {
                           <li>
                             {removalState.summary.memo_count} memos
                           </li>
+                          {!!removalState.summary.recovery_draft_count && (
+                            <li>
+                              {removalState.summary.recovery_draft_count} recovery
+                              drafts
+                            </li>
+                          )}
                         </ul>
+                        {!!removalState.summary.unreadable_sections?.length && (
+                          <p className="mt-2 text-[11.5px] text-[var(--warning, #b45309)]">
+                            ⚠️ Some sections could not be checked:{" "}
+                            {removalState.summary.unreadable_sections.join(", ")}
+                          </p>
+                        )}
                       </div>
                     ) : null}
-                    <p
-                      className="leading-relaxed"
-                      style={{ color: "var(--ink-2)" }}
-                    >
-                      This moves the project folder and its database into your{" "}
-                      {trashName()}. Transcripts stored in other folders are not
-                      deleted.
-                    </p>
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <p
+                        className="flex-1 leading-relaxed"
+                        style={{ color: "var(--ink-2)" }}
+                      >
+                        This moves the project folder and its database into your{" "}
+                        {trashName()}. Transcripts stored in other folders are not
+                        deleted.
+                      </p>
+                      {removalState.target.path && (
+                        <button
+                          type="button"
+                          onClick={handleSaveLocalCopy}
+                          className="btn btn-outline btn-xs gap-1.5 shrink-0"
+                          disabled={actionBusy}
+                        >
+                          <Icon name="export" size={12} />
+                          Save a local copy
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
-                {/* Remote-only leave view */}
-                {removalState.target.isRemoteOnly && (
-                  <p
-                    className="leading-relaxed"
-                    style={{ color: "var(--ink-2)" }}
-                  >
-                    You will no longer be listed as a member of this study on the
-                    server.
-                  </p>
-                )}
-
-                {/* Bound study options */}
-                {removalState.target.isBound &&
-                  !removalState.target.isRemoteOnly && (
-                    <div className="space-y-3">
-                      {/* Option 1: Detach Local */}
+                {/* Bound study options (both local and remote-only) */}
+                {removalState.target.isBound && (
+                  <div className="space-y-3">
+                    {/* Option 1: Detach Local (only if local folder exists) */}
+                    {removalState.target.path && (
                       <label
                         className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
                           removalState.mode === "detach"
@@ -1326,8 +1436,78 @@ export function WelcomeScreen() {
                           </div>
                         </div>
                       </label>
+                    )}
 
-                      {/* Option 2: Leave Study */}
+                    {/* Sole member notice */}
+                    {removalState.isSoleMember && (
+                      <div
+                        className="rounded-[10px] p-3 text-[12px] leading-relaxed"
+                        style={{
+                          background: "var(--warning-soft, #fef3c7)",
+                          color: "var(--warning, #b45309)",
+                        }}
+                      >
+                        <p className="font-semibold text-[12.5px]">
+                          You are the only member
+                        </p>
+                        <p className="mt-1">
+                          Leaving is blocked because it would make the study
+                          permanently unreachable. You can keep your local study
+                          by stopping sync, delete the shared study (as admin),
+                          or add another member first.
+                        </p>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          {removalState.target.path && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRemovalState((s) =>
+                                  s ? { ...s, mode: "detach" } : null,
+                                )
+                              }
+                              className={`btn btn-xs ${
+                                removalState.mode === "detach"
+                                  ? "btn-primary"
+                                  : "btn-outline"
+                              }`}
+                            >
+                              Stop syncing locally
+                            </button>
+                          )}
+                          {removalState.target.isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRemovalState((s) =>
+                                  s ? { ...s, mode: "delete_group" } : null,
+                                )
+                              }
+                              className={`btn btn-xs ${
+                                removalState.mode === "delete_group"
+                                  ? "btn-danger"
+                                  : "btn-outline"
+                              }`}
+                            >
+                              Delete shared study
+                            </button>
+                          )}
+                          {removalState.target.path && (
+                            <button
+                              type="button"
+                              onClick={handleSaveLocalCopy}
+                              className="btn btn-outline btn-xs gap-1"
+                              disabled={actionBusy}
+                            >
+                              <Icon name="export" size={11} />
+                              Save a local copy
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Option 2: Leave Study (only if not sole member) */}
+                    {!removalState.isSoleMember && (
                       <label
                         className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
                           removalState.mode === "leave"
@@ -1358,136 +1538,9 @@ export function WelcomeScreen() {
                             server and stops syncing locally.
                           </div>
 
-                          {removalState.mode === "leave" && removalState.isSoleMember && (
-                            <div
-                              className="mt-3 rounded-[10px] p-3 text-[12px] leading-relaxed"
-                              style={{
-                                background: "var(--warning-soft, #fef3c7)",
-                                color: "var(--warning, #b45309)",
-                              }}
-                            >
-                              <p className="font-semibold text-[12.5px]">
-                                You are the only member
-                              </p>
-                              <p className="mt-1">
-                                Leaving makes this study permanently unreachable — nobody, including you, will be able to open it again. Your coding stays on the server but no one can get to it.
-                              </p>
-                              <p className="mt-1">
-                                If you want to remove the study completely, choose <strong>{VOCABULARY.DELETE_GROUP_FOR_EVERYONE}</strong> instead.
-                              </p>
-                              <div className="mt-3">
-                                <label className="label text-[11.5px]" htmlFor="confirm-leave-input">
-                                  Type <strong>{removalState.target.title}</strong> to confirm:
-                                </label>
-                                <input
-                                  id="confirm-leave-input"
-                                  className="field mt-1 w-full text-[12.5px]"
-                                  value={removalState.confirmTitleInput}
-                                  onChange={(e) =>
-                                    setRemovalState((s) =>
-                                      s ? { ...s, confirmTitleInput: e.target.value } : null,
-                                    )
-                                  }
-                                  placeholder={removalState.target.title}
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          {removalState.mode === "leave" && (
-                            <div className="mt-3 border-t border-[var(--border)] pt-2.5">
-                              <label className="flex cursor-pointer items-center gap-2 text-[12.5px] font-medium text-[var(--ink)]">
-                                <input
-                                  type="checkbox"
-                                  checked={removalState.alsoDeleteFolder}
-                                  onChange={(e) =>
-                                    setRemovalState((s) =>
-                                      s
-                                        ? {
-                                            ...s,
-                                            alsoDeleteFolder: e.target.checked,
-                                          }
-                                        : null,
-                                    )
-                                  }
-                                />
-                                Also delete the project folder from this computer
-                              </label>
-                              {removalState.alsoDeleteFolder && (
-                                <p
-                                  className="mt-1 text-[11.5px]"
-                                  style={{ color: "var(--warning, #b45309)" }}
-                                >
-                                  ⚠️ This folder contains{" "}
-                                  {removalState.summary?.memo_count ?? 0} local
-                                  memos which are not saved on the server and will
-                                  be permanently deleted.
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </label>
-
-                      {/* Option 3: Delete for everyone (Admin only) */}
-                      {removalState.target.isAdmin && (
-                        <label
-                          className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-                            removalState.mode === "delete_group"
-                              ? "border-[var(--danger,#ef4444)] bg-[var(--fill)]"
-                              : "border-[var(--border)] hover:bg-[var(--fill)]"
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="removal_mode"
-                            checked={removalState.mode === "delete_group"}
-                            onChange={() =>
-                              setRemovalState((s) =>
-                                s ? { ...s, mode: "delete_group" } : null,
-                              )
-                            }
-                            className="mt-0.5"
-                          />
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 font-medium text-[var(--danger,#ef4444)]">
-                              Delete for everyone
-                              <span className="chip text-[10px]">Admin only</span>
-                            </div>
-                            <div
-                              className="mt-0.5 text-[12px] leading-relaxed"
-                              style={{ color: "var(--ink-2)" }}
-                            >
-                              Deletes the entire study on the server for all
-                              members. This cannot be undone.
-                            </div>
-
-                            {removalState.mode === "delete_group" && (
-                              <div className="mt-3 space-y-2 border-t border-[var(--border)] pt-2.5">
-                                <label className="block text-[12px] text-[var(--ink-2)]">
-                                  Type{" "}
-                                  <strong className="text-[var(--ink)]">
-                                    {removalState.target.title}
-                                  </strong>{" "}
-                                  to confirm:
-                                </label>
-                                <input
-                                  type="text"
-                                  value={removalState.confirmTitleInput}
-                                  onChange={(e) =>
-                                    setRemovalState((s) =>
-                                      s
-                                        ? {
-                                            ...s,
-                                            confirmTitleInput: e.target.value,
-                                          }
-                                        : null,
-                                    )
-                                  }
-                                  placeholder={removalState.target.title}
-                                  className="input input-sm w-full"
-                                  autoFocus
-                                />
+                          {removalState.mode === "leave" &&
+                            removalState.target.path && (
+                              <div className="mt-3 border-t border-[var(--border)] pt-2.5">
                                 <label className="flex cursor-pointer items-center gap-2 text-[12.5px] font-medium text-[var(--ink)]">
                                   <input
                                     type="checkbox"
@@ -1497,33 +1550,217 @@ export function WelcomeScreen() {
                                         s
                                           ? {
                                               ...s,
-                                              alsoDeleteFolder:
-                                                e.target.checked,
+                                              alsoDeleteFolder: e.target.checked,
                                             }
                                           : null,
                                       )
                                     }
                                   />
-                                  Also delete the project folder from this
-                                  computer
+                                  Also move the study folder to {trashName()} on
+                                  this computer
                                 </label>
                                 {removalState.alsoDeleteFolder && (
-                                  <p
-                                    className="mt-1 text-[11.5px]"
-                                    style={{ color: "var(--warning, #b45309)" }}
-                                  >
-                                    ⚠️ This folder contains{" "}
-                                    {removalState.summary?.memo_count ?? 0}{" "}
-                                    local memos which will be deleted.
-                                  </p>
+                                  <div className="mt-1.5 space-y-1.5">
+                                    {(() => {
+                                      const localMemos =
+                                        (removalState.summary?.memo_count ?? 0) +
+                                        (removalState.summary?.recovery_draft_count ?? 0);
+                                      if (
+                                        !removalState.summary ||
+                                        (removalState.summary.unreadable_sections &&
+                                          removalState.summary.unreadable_sections.length > 0)
+                                      ) {
+                                        return (
+                                          <>
+                                            <p
+                                              className="text-[11.5px]"
+                                              style={{ color: "var(--warning, #b45309)" }}
+                                            >
+                                              ⚠️ Fleuron could not check all local work.
+                                              Do not remove this folder until it can be
+                                              checked or preserved.
+                                            </p>
+                                            <button
+                                              type="button"
+                                              onClick={handleSaveLocalCopy}
+                                              className="btn btn-outline btn-xs gap-1"
+                                              disabled={actionBusy}
+                                            >
+                                              <Icon name="export" size={11} />
+                                              Save a local copy
+                                            </button>
+                                          </>
+                                        );
+                                      }
+                                      if (localMemos > 0) {
+                                        return (
+                                          <>
+                                            <p
+                                              className="text-[11.5px]"
+                                              style={{ color: "var(--warning, #b45309)" }}
+                                            >
+                                              ⚠️ This folder contains {localMemos} local
+                                              memo{localMemos === 1 ? "" : "s"} which are
+                                              not saved on the server and will be moved to{" "}
+                                              {trashName()}.
+                                            </p>
+                                            <button
+                                              type="button"
+                                              onClick={handleSaveLocalCopy}
+                                              className="btn btn-outline btn-xs gap-1"
+                                              disabled={actionBusy}
+                                            >
+                                              <Icon name="export" size={11} />
+                                              Save a local copy
+                                            </button>
+                                          </>
+                                        );
+                                      }
+                                      return (
+                                        <p
+                                          className="text-[11.5px]"
+                                          style={{ color: "var(--ink-2)" }}
+                                        >
+                                          This moves the study folder to {trashName()}.
+                                        </p>
+                                      );
+                                    })()}
+                                  </div>
                                 )}
                               </div>
                             )}
+                        </div>
+                      </label>
+                    )}
+
+                    {/* Option 3: Delete for everyone (Admin only) */}
+                    {removalState.target.isAdmin && (
+                      <label
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                          removalState.mode === "delete_group"
+                            ? "border-[var(--danger,#ef4444)] bg-[var(--fill)]"
+                            : "border-[var(--border)] hover:bg-[var(--fill)]"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="removal_mode"
+                          checked={removalState.mode === "delete_group"}
+                          onChange={() =>
+                            setRemovalState((s) =>
+                              s ? { ...s, mode: "delete_group" } : null,
+                            )
+                          }
+                          className="mt-0.5"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 font-medium text-[var(--danger,#ef4444)]">
+                            Delete for everyone
+                            <span className="chip text-[10px]">Admin only</span>
                           </div>
-                        </label>
-                      )}
-                    </div>
-                  )}
+                          <div
+                            className="mt-0.5 text-[12px] leading-relaxed"
+                            style={{ color: "var(--ink-2)" }}
+                          >
+                            Deletes the entire study on the server for all
+                            members. This cannot be undone.
+                          </div>
+
+                          {removalState.mode === "delete_group" && (
+                            <div className="mt-3 space-y-2 border-t border-[var(--border)] pt-2.5">
+                              <label className="block text-[12px] text-[var(--ink-2)]">
+                                Type{" "}
+                                <strong className="text-[var(--ink)]">
+                                  {removalState.target.title}
+                                </strong>{" "}
+                                to confirm:
+                              </label>
+                              <input
+                                type="text"
+                                value={removalState.confirmTitleInput}
+                                onChange={(e) =>
+                                  setRemovalState((s) =>
+                                    s
+                                      ? {
+                                          ...s,
+                                          confirmTitleInput: e.target.value,
+                                        }
+                                      : null,
+                                  )
+                                }
+                                placeholder={removalState.target.title}
+                                className="input input-sm w-full"
+                                autoFocus
+                              />
+                              {removalState.target.path && (
+                                <label className="flex cursor-pointer items-center gap-2 text-[12.5px] font-medium text-[var(--ink)]">
+                                  <input
+                                    type="checkbox"
+                                    checked={removalState.alsoDeleteFolder}
+                                    onChange={(e) =>
+                                      setRemovalState((s) =>
+                                        s
+                                          ? {
+                                              ...s,
+                                              alsoDeleteFolder: e.target.checked,
+                                            }
+                                          : null,
+                                      )
+                                    }
+                                  />
+                                  Also move the study folder to {trashName()} on
+                                  this computer
+                                </label>
+                              )}
+                              {removalState.alsoDeleteFolder && (
+                                <div className="mt-1 space-y-1.5">
+                                  {(() => {
+                                    const localMemos =
+                                      (removalState.summary?.memo_count ?? 0) +
+                                      (removalState.summary?.recovery_draft_count ?? 0);
+                                    if (localMemos > 0) {
+                                      return (
+                                        <>
+                                          <p
+                                            className="text-[11.5px]"
+                                            style={{
+                                              color: "var(--warning, #b45309)",
+                                            }}
+                                          >
+                                            ⚠️ This folder contains {localMemos}{" "}
+                                            local memo{localMemos === 1 ? "" : "s"}{" "}
+                                            which will be moved to {trashName()}.
+                                          </p>
+                                          <button
+                                            type="button"
+                                            onClick={handleSaveLocalCopy}
+                                            className="btn btn-outline btn-xs gap-1"
+                                            disabled={actionBusy}
+                                          >
+                                            <Icon name="export" size={11} />
+                                            Save a local copy
+                                          </button>
+                                        </>
+                                      );
+                                    }
+                                    return (
+                                      <p
+                                        className="text-[11.5px]"
+                                        style={{ color: "var(--ink-2)" }}
+                                      >
+                                        This moves the study folder to {trashName()}.
+                                      </p>
+                                    );
+                                  })()}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </label>
+                    )}
+                  </div>
+                )}
               </div>
             </Modal>
           )}
@@ -1542,22 +1779,6 @@ export function WelcomeScreen() {
   );
 }
 
-/** App mark: transcript lines resolving into a coded block. */
-function Mark() {
-  return (
-    <div
-      className="glass-card grid h-[72px] w-[72px] place-items-center"
-      style={{ borderRadius: 20 }}
-    >
-      <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
-        <rect x="6" y="7" width="15" height="3" rx="1.5" fill="var(--ink-3)" />
-        <rect x="6" y="14" width="24" height="3" rx="1.5" fill="var(--accent)" />
-        <rect x="6" y="21" width="19" height="3" rx="1.5" fill="var(--ink-3)" />
-        <rect x="6" y="28" width="11" height="3" rx="1.5" fill="var(--ink-4)" />
-      </svg>
-    </div>
-  );
-}
 
 function HomeCard({
   icon,

@@ -10,8 +10,8 @@ Only these two files are manual downloads:
 
 | Your computer | Download this exact file |
 | --- | --- |
-| macOS (Intel or Apple Silicon) | `Fleuron_2.6.0_universal.dmg` |
-| Windows 11 x64 | `Fleuron_2.6.0_x64-setup.exe` |
+| macOS (Intel or Apple Silicon) | `Fleuron_2.7.0_universal.dmg` |
+| Windows 11 x64 | `Fleuron_2.7.0_x64-setup.exe` |
 
 You may also see these on a release page. They are **updater infrastructure — do not download them by hand**:
 `Fleuron_universal.app.tar.gz`, `.sig` signature files, `latest.json`, `SHA256SUMS.txt`.
@@ -33,7 +33,7 @@ Open Anyway stays available after the first run unless macOS re-prompts after an
 
 ## Install on Windows 11
 
-1. Double-click `Fleuron_2.6.0_x64-setup.exe`.
+1. Double-click `Fleuron_2.7.0_x64-setup.exe`.
 2. **Expected warning:** SmartScreen shows **“Windows protected your PC”** with *Unknown publisher*. Expected for a newly published, non-store app.
 3. Click **More info**, confirm *Unknown publisher*, then **Run anyway**.
 4. The installer installs for **your user account only**. It never asks for administrator credentials. There is no UAC prompt anywhere in this flow.

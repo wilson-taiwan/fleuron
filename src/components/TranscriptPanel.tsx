@@ -10,6 +10,7 @@ import { basename } from "../lib/format";
 import { NewInterviewModal } from "./NewInterviewModal";
 import { BulkImportModal } from "./BulkImportModal";
 import { InterviewSettingsModal } from "./InterviewSettingsModal";
+import { ManageSpeakersModal } from "./ManageSpeakersModal";
 import { TranscriptLinkPanel } from "./TranscriptLinkPanel";
 import { api } from "../lib/api";
 import {
@@ -152,6 +153,8 @@ export function TranscriptPanel() {
   const [showLinkPanel, setShowLinkPanel] = useState(false);
   const [pendingCoded, setPendingCoded] = useState(0);
   const [editingInterview, setEditingInterview] = useState<Interview | null>(null);
+  const [managingSpeakersInterview, setManagingSpeakersInterview] =
+    useState<Interview | null>(null);
   const [speakerPopoverSegment, setSpeakerPopoverSegment] =
     useState<TranscriptSegment | null>(null);
   const [speakerPopoverRect, setSpeakerPopoverRect] = useState<DOMRect | null>(
@@ -828,6 +831,11 @@ export function TranscriptPanel() {
         onSelect: () => setEditingInterview(interview),
       },
       {
+        label: "Manage speakers…",
+        icon: "settings" as const,
+        onSelect: () => setManagingSpeakersInterview(interview),
+      },
+      {
         label: "Replace transcript…",
         icon: "import" as const,
         onSelect: () => pickVttAndImport(interview.id),
@@ -1489,6 +1497,14 @@ export function TranscriptPanel() {
           onToggleRedaction={(on) =>
             setSpeakerRedaction(editingInterview.id, on)
           }
+        />
+      )}
+
+      {managingSpeakersInterview && (
+        <ManageSpeakersModal
+          open={true}
+          interview={managingSpeakersInterview}
+          onClose={() => setManagingSpeakersInterview(null)}
         />
       )}
 

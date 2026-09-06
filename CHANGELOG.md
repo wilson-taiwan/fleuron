@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0]
+
+### Fixed
+
+- **macOS window reopen from Dock:** Clicking the Fleuron dock icon when all windows are closed on macOS now reopens the application window instead of remaining inactive.
+- **Accidental deletion prevention:** Permanent file destruction via direct unlinking is eliminated; deleting a study moves its files safely to the system Trash or Recycle Bin with clear recovery steps.
+- **Collaborative leave safety:** Leaving a shared study preserves local data and remote project integrity; sole members cannot orphan shared studies, and non-admin participants are protected from accidental project destruction.
+
+### Added
+
+- **Guided setup flow:** A four-step guided setup (Study Details, Collaborators, Initial Files, Summary) replaces modal setup prompts, with non-blocking "Finish setup later" and preserved progress stored directly in the study file.
+- **Whole-interview speaker management:** A dedicated "Manage Speakers" modal in the transcript menu allows viewing turn and coded segment counts per speaker, renaming all instances across the interview, and merging speakers with rollback support.
+- **Study lifecycle coordinator and preflight:** Intelligent detection and user guidance for missing files, moved directories, locked stores, and offline volumes before opening or creating studies.
+- **Preserved local backups:** "Save local copy" exports a verified SQLite snapshot with external transcript references outside the project folder for portable offline archiving.
+
+---
+
 ## [2.6.0]
 
 ### Fixed

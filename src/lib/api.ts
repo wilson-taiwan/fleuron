@@ -3,6 +3,7 @@ import type { ExportConfig } from "./export-config";
 import type {
   ActivityLogEntry,
   BackupInfo,
+  ProjectDeletionSummary,
   AppPreferences,
   AppVersionInfo,
   RestoreOutcome,
@@ -57,6 +58,7 @@ import type {
   OpenMarkerStatus,
   LeftStudy,
   SegmentSpeakerChange,
+  InterviewSpeakerSummary,
 } from "./types";
 import type { StudyReadiness } from "./home-rows";
 
@@ -181,6 +183,27 @@ export const api = {
 
   restoreSegmentSpeakers: (changes: SegmentSpeakerChange[]) =>
     invoke<void>("restore_segment_speakers", { changes }),
+
+  getInterviewSpeakers: (interviewId: string) =>
+    invoke<InterviewSpeakerSummary[]>("get_interview_speakers", {
+      interviewId,
+    }),
+
+  renameInterviewSpeaker: (input: {
+    project_key?: string | null;
+    epoch?: string | null;
+    interview_id: string;
+    old_speaker: string;
+    new_speaker: string;
+    expected_count?: number;
+  }) => invoke<SegmentSpeakerChange[]>("rename_interview_speaker", { input }),
+
+  undoRenameInterviewSpeaker: (input: {
+    project_key?: string | null;
+    epoch?: string | null;
+    interview_id: string;
+    changes: SegmentSpeakerChange[];
+  }) => invoke<void>("undo_rename_interview_speaker", { input }),
 
   setSegmentReviewed: (segmentId: string, reviewed: boolean) =>
     invoke<void>("set_segment_reviewed", { segmentId, reviewed }),
@@ -456,15 +479,19 @@ export const api = {
 
   /** Returns count of interviews, coded segments, and memos for a project folder. */
   projectDeletionSummary: (path: string) =>
-    invoke<{
-      interview_count: number;
-      coded_segment_count: number;
-      memo_count: number;
-    }>("project_deletion_summary", { path }),
+    invoke<ProjectDeletionSummary>("project_deletion_summary", { path }),
 
   /** Moves a project folder to Trash. */
   deleteProjectFolder: (path: string) =>
     invoke<void>("delete_project_folder", { path }),
+
+  /** Saves a local verified recovery archive of a study outside its project directory. */
+  saveLocalCopy: (sourcePath: string, destinationDir: string, includeExternalMedia = true) =>
+    invoke<BackupInfo>("save_local_copy", { sourcePath, destinationDir, includeExternalMedia }),
+
+  /** Restores a study backup to a newly allocated project folder. */
+  restoreStudyBackup: (archivePath: string, parentDir?: string, targetTitle?: string) =>
+    invoke<string>("restore_study_backup", { archivePath, parentDir, targetTitle }),
 
   /**
    * Change the name you file under in this group. The server rewrites your

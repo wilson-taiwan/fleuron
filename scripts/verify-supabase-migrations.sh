@@ -39,6 +39,7 @@ V1_BASELINE="20260823000000_v1_certified_baseline.sql"
 SCHEMA_10="20260823000001_sync_protocol_v2_schema_10.sql"
 ENTITLEMENTS="20260826000000_entitlements_and_sync_gate.sql"
 NULL_SPANS_AND_HEADS="20260904000000_sync_v2_allow_null_spans_and_grant_heads.sql"
+STUDY_LIFECYCLE="20260906000000_study_lifecycle_guards.sql"
 CERTIFIED_SCHEMA_VERSION="10"
 
 fail() {
@@ -75,11 +76,11 @@ done
 ok "all $count migration filenames are well-formed with strictly increasing timestamps"
 
 # ── 2. Required migrations present ───────────────────────────────────────────
-for required in "$V1_BASELINE" "$SCHEMA_10" "$ENTITLEMENTS" "$NULL_SPANS_AND_HEADS"; do
+for required in "$V1_BASELINE" "$SCHEMA_10" "$ENTITLEMENTS" "$NULL_SPANS_AND_HEADS" "$STUDY_LIFECYCLE"; do
   [[ -f "$MIGRATIONS_DIR/$required" ]] \
     || fail "required migration missing: $required"
 done
-ok "v1 baseline, schema-10 migration, entitlements migration, and null-spans/realtime migration are present"
+ok "v1 baseline, schema-10, entitlements, null-spans/realtime, and study lifecycle migrations are present"
 
 # ── 3. Protocol-2 RPC tokens in the authoritative migration ──────────────────
 schema10_body="$(cat "$MIGRATIONS_DIR/$SCHEMA_10")"
@@ -155,7 +156,19 @@ if [[ -n "$extra_grants" ]]; then
 fi
 ok "null-spans validator replacement and exact sync_project_heads grant are intact"
 
-# ── 6. Schema certification stays 10 across all post-schema-10 migrations ────
+# ── 6. Study lifecycle guards and preflight RPC ──────────────────────────────
+lifecycle_body="$(cat "$MIGRATIONS_DIR/$STUDY_LIFECYCLE")"
+grep -Fq "public.study_lifecycle_preflight(p_project_id text)" <<<"$lifecycle_body" \
+  || fail "study lifecycle migration does not define study_lifecycle_preflight"
+grep -Fq "public.create_project_idempotent" <<<"$lifecycle_body" \
+  || fail "study lifecycle migration does not define create_project_idempotent"
+grep -Fq "LAST_MEMBER_CANNOT_LEAVE" <<<"$lifecycle_body" \
+  || fail "study lifecycle migration does not guard against sole member departure"
+grep -Fq "trg_check_project_members_not_empty" <<<"$lifecycle_body" \
+  || fail "study lifecycle migration does not guard project_members deletion"
+ok "study lifecycle preflight, idempotency and last-member guards are intact"
+
+# ── 7. Schema certification stays 10 across all post-schema-10 migrations ────
 for migration in "$MIGRATIONS_DIR"/*.sql; do
   m_name="$(basename "$migration")"
   if [[ "$m_name" > "$SCHEMA_10" ]]; then

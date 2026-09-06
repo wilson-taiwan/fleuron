@@ -24,6 +24,7 @@ import type {
 import { parseFileError, type FileAccessUi } from "../lib/file-access";
 import { parseTranscriptFile } from "../hooks/useVttParser";
 import { CollaborationDisclosure } from "./CollaborationDisclosure";
+import { setupJournal } from "../lib/setup-journal";
 
 export type JoinError =
   | FileAccessUi
@@ -528,24 +529,53 @@ export function JoinStudyModal() {
     setStage("creating");
     setError(null);
     const hadProject = !!useProjectStore.getState().project;
+    let journal = setupJournal.getActive();
+    if (!journal || journal.projectId !== membership.projectId) {
+      journal = setupJournal.start("join_group", {
+        title: membership.title,
+        coderName: membership.coderName,
+        projectId: membership.projectId,
+      });
+    }
+
     try {
       if (opts.existingPath) {
         await openProject(opts.existingPath);
         await api.syncJoinProject(membership.projectId);
       } else {
         const parentDir = await api.getProjectsLibraryDir();
-        const folderName =
-          targetVerdict && "suggested_name" in targetVerdict
-            ? targetVerdict.suggested_name
-            : slugify(membership.title);
-        const created = await api.createProject({
-          parent_dir: parentDir,
-          project_name: folderName,
-          title: membership.title,
-          coders: [membership.coderName],
-        });
-        await api.syncJoinProject(membership.projectId);
-        await openProject(created.path);
+        let createdPath = journal.canonicalFolder;
+        if (!createdPath || !journal.completedStages.includes("created_folder")) {
+          const folderName =
+            targetVerdict && "suggested_name" in targetVerdict
+              ? targetVerdict.suggested_name
+              : slugify(membership.title);
+          const created = await api.createProject({
+            parent_dir: parentDir,
+            project_name: folderName,
+            title: membership.title,
+            coders: [membership.coderName],
+          });
+          createdPath = created.path;
+          journal =
+            setupJournal.markStageComplete(
+              journal.operationId,
+              "created_folder",
+              "bound_to_group",
+              { canonicalFolder: createdPath },
+            ) || journal;
+        }
+
+        if (!journal.completedStages.includes("bound_to_group")) {
+          await api.syncJoinProject(membership.projectId);
+          journal =
+            setupJournal.markStageComplete(
+              journal.operationId,
+              "bound_to_group",
+              "initial_sync_done",
+            ) || journal;
+        }
+        await openProject(createdPath);
       }
       useProjectStore.getState().adoptCoderName(membership.coderName);
       const outcome = await api.syncNow();
@@ -553,6 +583,8 @@ export function JoinStudyModal() {
       useSyncStore.setState({ lastOutcome: outcome, error: null });
       void useSyncStore.getState().refreshGroup();
       void useSyncStore.getState().refreshStatus();
+
+      setupJournal.clear(journal.operationId);
 
       if (outcome && outcome.missingTranscripts && outcome.missingTranscripts.length > 0) {
         setNeeded(outcome.missingTranscripts);
@@ -577,8 +609,17 @@ export function JoinStudyModal() {
   async function continueFromCopy() {
     const membership = pendingMembership;
     if (!membership) return;
+    if (targetVerdict && targetVerdict.verdict === "already_set_up_here") {
+      await openProject(targetVerdict.path);
+      close();
+      return;
+    }
     if (copyChoice === "new") {
       await join(membership);
+      return;
+    }
+    if (targetVerdict && targetVerdict.verdict === "adoptable_unbound") {
+      await join(membership, { existingPath: targetVerdict.path });
       return;
     }
     const path = await pickProjectPath();
@@ -831,8 +872,18 @@ export function JoinStudyModal() {
                   >
                     <p className="font-semibold">This study is already set up on this computer.</p>
                     <p className="mt-1 opacity-80">
-                      Located at <span className="font-mono">{targetVerdict.path}</span>. You can open it directly from the home screen.
+                      Located at <span className="font-mono">{targetVerdict.path}</span>. You can open it directly from the home screen or open it now.
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void openProject(targetVerdict.path);
+                        close();
+                      }}
+                      className="btn btn-outline btn-xs mt-2"
+                    >
+                      Open study
+                    </button>
                   </div>
                 )}
                 {targetVerdict && targetVerdict.verdict === "adoptable_unbound" && (
@@ -1121,24 +1172,41 @@ export function JoinStudyModal() {
                   disabled={busy}
                   onClick={() => void continueFromCopy()}
                 >
-                  {copyChoice === "existing" ? "Choose folder…" : "Create copy"}
+                  {targetVerdict?.verdict === "already_set_up_here"
+                    ? "Open study"
+                    : copyChoice === "existing"
+                      ? targetVerdict?.verdict === "adoptable_unbound"
+                        ? "Reconnect this study"
+                        : "Choose folder…"
+                      : "Create copy"}
                   <Icon name="arrowRight" size={15} />
                 </button>
               )}
               {stage === "imports" && (
-                <button
-                  type="button"
-                  onClick={close}
-                  disabled={!allLinked}
-                  className="btn btn-primary btn-lg"
-                  title={
-                    allLinked
-                      ? undefined
-                      : "Link every transcript first — coding together needs both copies to hold the same words"
-                  }
-                >
-                  Start coding
-                </button>
+                <>
+                  {!allLinked && (
+                    <button
+                      type="button"
+                      onClick={close}
+                      className="btn btn-outline btn-lg"
+                    >
+                      Finish later
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={close}
+                    disabled={!allLinked}
+                    className="btn btn-primary btn-lg"
+                    title={
+                      allLinked
+                        ? undefined
+                        : "Link every transcript first — coding together needs both copies to hold the same words"
+                    }
+                  >
+                    Start coding
+                  </button>
+                </>
               )}
             </div>
           </footer>

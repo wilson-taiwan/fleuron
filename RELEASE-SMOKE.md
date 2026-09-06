@@ -8,7 +8,7 @@ release is not ready.
 > All evidence is redacted and synthetic: no real study data, participant text,
 > or account identifiers may be recorded here or in the release notes.
 
-- **Version:** 2.6.0
+- **Version:** 2.7.0
 - **Commit:** pending tag (see git log at release time)
 - **Platform / build:** macOS arm64 debug bundle (`Fleuron.app`, id `study.fleuron.desktop`); Windows unverified
 - **Date (last run):** 2026-09-06
@@ -115,3 +115,16 @@ release is not ready.
 - [ ] Win11 VM: a `.codemap` folder from before the rename still opens (`PENDING DRAFT ASSET — requires the built installer`)
 - [ ] Win11 VM: upgrade over an installed 1.2.0 — confirm it installs **alongside**, does not corrupt the 1.2.0 install, and Add/Remove Programs shows both (`PENDING DRAFT ASSET — requires the built installer`)
 - [x] macOS: `Fleuron.app` launches, creates `~/Library/Application Support/study.fleuron.desktop/`, and `~/Fleuron` is the default new-project location (`Last verified: 2026-08-28 — built debug bundle launched: Info.plist reports study.fleuron.desktop / Fleuron / 2.0.0, doc types fleuron+codemap+qcproj; data dir created with crashes, run-markers, sync-device-id; clean quit, no crash report. ~/Fleuron default from app_data.rs projects_library_dir (computed from home, no stored override in app-preferences.json) + its 3-platform unit test`)
+
+## 18. Study lifecycle, discovery & preservation (2.7.0 new)
+
+- [x] Local removal uses Trash/Recycle Bin only; fallback to permanent deletion is eliminated (`Last verified: 2026-09-06 — db.rs delete_project_folder_impl rejects unlinking; unit tests in open-project.test.ts, study-problem.ts, dev-mock-parity.test.ts PASS`)
+- [x] Capability-based removal modal blocks sole-member leave, exposes admin delete, and handles remote-only studies (`Last verified: 2026-09-06 — WelcomeScreen.removal.test.ts 8/8; e2e study-lifecycle.spec.ts PASS`)
+- [x] Save local copy preserves SQLite snapshot, active note drafts, and external references outside project folder (`Last verified: 2026-09-06 — cargo test backup::tests; dev-mock save_local_copy PASS`)
+- [x] Restore a study backup unrolls archive into freshly allocated folder without resuming remote writes (`Last verified: 2026-09-06 — packaged-app selftest backup-restore PASS; e2e study-lifecycle.spec.ts PASS`)
+- [x] Server membership invariants enforced via forward migration `20260906000000_study_lifecycle_guards.sql` (`Last verified: 2026-09-06 — verify-supabase-migrations.sh 8/8 checks passed; pgTAP test suite present`)
+
+## 19. Whole-interview speaker management (2.7.0 new)
+
+- [x] Manage Speakers renames all matching turns across active interview with turn counts and undo support (`Last verified: 2026-09-06 — cargo test db::tests::rename_interview_speaker; e2e manage-speakers.spec.ts PASS`)
+- [x] Speaker changes apply locally on this computer; empty/invalid names rejected (`Last verified: 2026-09-06 — TranscriptPanel.menu.test.ts; e2e manage-speakers.spec.ts PASS`)

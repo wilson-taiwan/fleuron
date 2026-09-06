@@ -13,6 +13,7 @@ import { labelFromFilename } from "../../lib/transcript-parser";
 import { StepRail, type StepSpec } from "./StepRail";
 import { StudyLabelField } from "../StudyLabelField";
 import { OptionCard } from "./OptionCard";
+import { setupJournal } from "../../lib/setup-journal";
 
 const STEPS: StepSpec[] = [
   { id: "study", title: "Study", caption: "Name it and pick a home" },
@@ -173,37 +174,85 @@ export function SetupWizard() {
 
   async function finish() {
     setError(null);
-    setBusy("Creating project folder…");
+    let journal = setupJournal.getActive();
+    if (!journal || journal.title !== title.trim()) {
+      journal = setupJournal.start("new_local", {
+        title: title.trim(),
+        coderName: yourName.trim(),
+        canonicalFolder: effectiveFolder,
+      });
+    }
+
     try {
-      const ok = await createProject(
-        parentDir!,
-        effectiveFolder,
-        title.trim(),
-        [yourName.trim()],
-      );
-      if (!ok) {
-        setError(
-          useProjectStore.getState().error ?? "Could not create the project.",
+      if (!journal.completedStages.includes("created_folder")) {
+        setBusy("Creating project folder…");
+        const ok = await createProject(
+          parentDir!,
+          effectiveFolder,
+          title.trim(),
+          [yourName.trim()],
         );
-        setBusy(null);
-        return;
+        if (!ok) {
+          setError(
+            useProjectStore.getState().error ?? "Could not create the project.",
+          );
+          setBusy(null);
+          return;
+        }
+        journal =
+          setupJournal.markStageComplete(
+            journal.operationId,
+            "created_folder",
+            "template_initialized",
+          ) || journal;
       }
 
       const template = getCodebookTemplate(templateId);
-      if (template.codes.length > 0) {
+      if (
+        template.codes.length > 0 &&
+        !journal.completedStages.includes("template_initialized")
+      ) {
         setBusy("Adding starter codes…");
-        await seedCodes(template.codes);
+        try {
+          await seedCodes(template.codes);
+          journal =
+            setupJournal.markStageComplete(
+              journal.operationId,
+              "template_initialized",
+              "transcript_imported",
+            ) || journal;
+        } catch {
+          setError("Your study was created. Starter codes could not be added.");
+          setBusy(null);
+          return;
+        }
       }
 
-      if (vttPath) {
+      if (
+        vttPath &&
+        !journal.completedStages.includes("transcript_imported")
+      ) {
         setBusy("Importing transcript…");
-        await createInterview(
-          participantLabel.trim(),
-          new Date().toISOString().slice(0, 10),
-        );
-        await importVtt(vttPath);
+        try {
+          await createInterview(
+            participantLabel.trim(),
+            new Date().toISOString().slice(0, 10),
+          );
+          await importVtt(vttPath);
+          journal =
+            setupJournal.markStageComplete(
+              journal.operationId,
+              "transcript_imported",
+              "completed",
+            ) || journal;
+        } catch {
+          setError("Your study was created. This transcript could not be imported.");
+          setBusy(null);
+          return;
+        }
       }
 
+      setupJournal.clear(journal.operationId);
       closeSetup();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -458,12 +507,66 @@ export function SetupWizard() {
 
           {error && (
             <div
-              className="mx-9 mb-3 flex items-start gap-2 rounded-[12px] px-3 py-2.5 text-[12.5px]"
+              className="mx-9 mb-3 flex flex-col gap-2 rounded-[12px] px-3 py-2.5 text-[12.5px]"
               style={{ background: "var(--danger-soft)", color: "var(--danger)" }}
               role="alert"
             >
-              <Icon name="alert" size={15} />
-              <span>{error}</span>
+              <div className="flex items-start gap-2">
+                <Icon name="alert" size={15} />
+                <span>{error}</span>
+              </div>
+              {error === "Your study was created. Starter codes could not be added." && (
+                <div className="flex items-center gap-2 pl-5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void finish()}
+                    className="btn btn-outline btn-xs"
+                  >
+                    Retry starter codes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setupJournal.clear();
+                      closeSetup();
+                    }}
+                    className="btn btn-ghost btn-xs"
+                  >
+                    Open study without starter codes
+                  </button>
+                </div>
+              )}
+              {error === "Your study was created. This transcript could not be imported." && (
+                <div className="flex items-center gap-2 pl-5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void finish()}
+                    className="btn btn-outline btn-xs"
+                  >
+                    Retry import
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVttPath(null);
+                      setError(null);
+                    }}
+                    className="btn btn-outline btn-xs"
+                  >
+                    Choose another file
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setupJournal.clear();
+                      closeSetup();
+                    }}
+                    className="btn btn-ghost btn-xs"
+                  >
+                    Finish later
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

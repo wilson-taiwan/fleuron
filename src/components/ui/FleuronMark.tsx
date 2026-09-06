@@ -1,0 +1,39 @@
+interface FleuronMarkProps {
+  size?: number;
+  className?: string;
+}
+
+/**
+ * Canonical Fleuron brand mark (F-and-flower).
+ * Replaces obsolete transcript bars across all welcome/home states.
+ */
+export function FleuronMark({ size = 72, className = "" }: FleuronMarkProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 1024 1024"
+      aria-hidden="true"
+      className={`select-none ${className}`}
+      style={{ width: size, height: size }}
+    >
+      <rect x="100" y="100" width="824" height="824" rx="184" fill="#14120E" />
+      <g transform="translate(202 202) scale(6.2)">
+        <g transform="translate(50 50) scale(0.7433) translate(-48.500 -47.443)">
+          <path
+            d="M 47.19 27.05 C 47.79 49.05, 46.39 71.05, 43.79 90.05 L 29.41 103.95 C 32.01 84.95, 33.41 62.95, 32.81 40.95 Z M 27.19 37.05 C 45.19 34.05, 65.19 32.05, 84.19 31.05 L 69.81 44.95 C 50.81 45.95, 30.81 47.95, 12.81 50.95 Z M 49.48 61.05 C 57.48 59.85, 65.48 58.65, 74.48 57.55 L 60.10 71.45 C 51.10 72.55, 43.10 73.75, 35.10 74.95 Z"
+            fill="#F7F3EA"
+          />
+          <g transform="translate(41 12) scale(1.3)">
+            <g transform="rotate(0.0)"><path d="M0 0 C -5.2 -2.6, -7.2 -8.6, -2.4 -12.6 C 2.4 -16, 7.2 -11.4, 6 -6 C 5 -1.8, 2.4 0.4, 0 0 Z" fill="#E8B93C" /></g>
+            <g transform="rotate(72.0)"><path d="M0 0 C -5.2 -2.6, -7.2 -8.6, -2.4 -12.6 C 2.4 -16, 7.2 -11.4, 6 -6 C 5 -1.8, 2.4 0.4, 0 0 Z" fill="#E8B93C" /></g>
+            <g transform="rotate(144.0)"><path d="M0 0 C -5.2 -2.6, -7.2 -8.6, -2.4 -12.6 C 2.4 -16, 7.2 -11.4, 6 -6 C 5 -1.8, 2.4 0.4, 0 0 Z" fill="#E8B93C" /></g>
+            <g transform="rotate(216.0)"><path d="M0 0 C -5.2 -2.6, -7.2 -8.6, -2.4 -12.6 C 2.4 -16, 7.2 -11.4, 6 -6 C 5 -1.8, 2.4 0.4, 0 0 Z" fill="#E8B93C" /></g>
+            <g transform="rotate(288.0)"><path d="M0 0 C -5.2 -2.6, -7.2 -8.6, -2.4 -12.6 C 2.4 -16, 7.2 -11.4, 6 -6 C 5 -1.8, 2.4 0.4, 0 0 Z" fill="#E8B93C" /></g>
+            <circle r="3.4" fill="#E8B93C" />
+          </g>
+        </g>
+      </g>
+    </svg>
+  );
+}

@@ -2160,7 +2160,7 @@ pub const PROJECT_EXT: &str = "fleuron";
 
 /// Extensions the app opens. `codemap` and `qcproj` are pre-rename names and
 /// stay supported indefinitely — projects already on Drive must keep working.
-const PROJECT_EXTS: [&str; 3] = ["fleuron", "codemap", "qcproj"];
+pub const PROJECT_EXTS: [&str; 3] = ["fleuron", "codemap", "qcproj"];
 
 pub fn create_project(input: &CreateProjectInput) -> rusqlite::Result<PathBuf> {
     let already_suffixed = PROJECT_EXTS
@@ -4201,6 +4201,100 @@ pub fn restore_segment_speakers(
     Ok(())
 }
 
+pub fn get_interview_speakers(
+    conn: &Connection,
+    interview_id: &str,
+) -> rusqlite::Result<Vec<crate::models::InterviewSpeakerSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT speaker, COUNT(*) FROM transcript_segments
+         WHERE interview_id = ?1
+         GROUP BY speaker
+         ORDER BY MIN(segment_index) ASC",
+    )?;
+    let rows = stmt.query_map(params![interview_id], |row| {
+        Ok(crate::models::InterviewSpeakerSummary {
+            speaker: row.get(0)?,
+            turn_count: row.get::<_, i64>(1)? as usize,
+        })
+    })?;
+    let mut list = Vec::new();
+    for row in rows {
+        list.push(row?);
+    }
+    Ok(list)
+}
+
+pub fn rename_interview_speaker(
+    conn: &Connection,
+    interview_id: &str,
+    old_speaker: &str,
+    new_speaker: &str,
+    expected_count: Option<usize>,
+) -> rusqlite::Result<Vec<SegmentSpeakerChange>> {
+    let trimmed = new_speaker.trim();
+    if trimmed.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Speaker cannot be empty".into(),
+        ));
+    }
+    if trimmed.len() > 120 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Speaker name cannot exceed 120 characters".into(),
+        ));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Speaker name cannot contain control characters".into(),
+        ));
+    }
+    if trimmed == old_speaker {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+
+    let mut stmt = tx.prepare(
+        "SELECT id, speaker FROM transcript_segments
+         WHERE interview_id = ?1 AND speaker = ?2
+         ORDER BY segment_index ASC",
+    )?;
+    let rows = stmt.query_map(params![interview_id, old_speaker], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut affected = Vec::new();
+    for row in rows {
+        affected.push(row?);
+    }
+    drop(stmt);
+
+    if let Some(exp) = expected_count {
+        if affected.len() != exp {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Speaker turn count changed from {} to {}",
+                exp,
+                affected.len()
+            )));
+        }
+    }
+
+    let mut changes = Vec::with_capacity(affected.len());
+    let mut update_stmt =
+        tx.prepare("UPDATE transcript_segments SET speaker = ?1 WHERE id = ?2")?;
+
+    for (id, old) in affected {
+        update_stmt.execute(params![trimmed, id])?;
+        changes.push(SegmentSpeakerChange {
+            segment_id: id,
+            old_speaker: old,
+            new_speaker: trimmed.to_string(),
+        });
+    }
+    drop(update_stmt);
+
+    tx.commit()?;
+    Ok(changes)
+}
+
 pub fn set_segment_reviewed(
     conn: &Connection,
     segment_id: &str,
@@ -4919,7 +5013,15 @@ pub fn list_coded_segments(
     Ok(results)
 }
 
+#[allow(dead_code)]
 pub fn get_project_deletion_summary(path: &str) -> Result<ProjectDeletionSummary, String> {
+    get_project_deletion_summary_with_recovery(path, None)
+}
+
+pub fn get_project_deletion_summary_with_recovery(
+    path: &str,
+    recovery_conn: Option<&Connection>,
+) -> Result<ProjectDeletionSummary, String> {
     let p = Path::new(path);
     // Legacy probe: a nested `.codemap/project.db` layout that predates the flat
     // one below. Deliberately NOT renamed to `.fleuron` — that would probe a
@@ -4931,49 +5033,196 @@ pub fn get_project_deletion_summary(path: &str) -> Result<ProjectDeletionSummary
         p.join("project.db")
     };
 
+    let mut unreadable_sections = Vec::new();
+
     if !actual_db.exists() {
-        return Err("Not a valid Fleuron project database".into());
+        unreadable_sections.push("Database file does not exist".to_string());
+        return Ok(ProjectDeletionSummary {
+            interview_count: 0,
+            coded_segment_count: 0,
+            memo_count: 0,
+            segment_count: 0,
+            hub_memo_count: 0,
+            passage_memo_count: 0,
+            unsynced_op_count: 0,
+            conflict_count: 0,
+            recovery_draft_count: 0,
+            local_attachment_count: 0,
+            unreadable_sections,
+            is_completely_read: false,
+        });
     }
 
-    let conn = Connection::open_with_flags(
+    let conn = match Connection::open_with_flags(
         &actual_db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            unreadable_sections.push(format!("Database cannot be opened: {e}"));
+            None
+        }
+    };
 
-    let interview_count: usize = conn
-        .query_row(
-            "SELECT COUNT(*) FROM interviews WHERE deleted = 0",
-            [],
-            |r| r.get::<_, i64>(0),
+    let (
+        interview_count,
+        segment_count,
+        coded_segment_count,
+        passage_memo_count,
+        hub_memo_count,
+        unsynced_op_count,
+        conflict_count,
+    ) = if let Some(ref c) = conn {
+        let interviews = c
+            .query_row(
+                "SELECT COUNT(*) FROM interviews WHERE deleted = 0",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or_else(|e| {
+                unreadable_sections.push(format!("Interviews count unreadable: {e}"));
+                0
+            });
+
+        let segments = c
+            .query_row("SELECT COUNT(*) FROM transcript_segments", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as usize)
+            .unwrap_or_else(|e| {
+                unreadable_sections.push(format!("Segments count unreadable: {e}"));
+                0
+            });
+
+        let coded = c
+            .query_row(
+                "SELECT COUNT(*) FROM coded_segments WHERE deleted = 0",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or_else(|e| {
+                unreadable_sections.push(format!("Coded segments count unreadable: {e}"));
+                0
+            });
+
+        let passage_memos = c
+            .query_row(
+                "SELECT COUNT(*) FROM coded_segments WHERE deleted = 0 AND memo IS NOT NULL AND trim(memo) != ''",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
+        let hub_memos = c
+            .query_row(
+                "SELECT COUNT(*) FROM interviews WHERE deleted = 0 AND hub_memo IS NOT NULL AND trim(hub_memo) != ''",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
+        let unsynced: usize = c
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM codebook WHERE sync_dirty != 0) +
+                        (SELECT COUNT(*) FROM interviews WHERE sync_dirty != 0) +
+                        (SELECT COUNT(*) FROM coded_segments WHERE sync_dirty != 0)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
+        let conflicts: usize = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_conflicts'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .and_then(|exists| {
+                if exists > 0 {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM sync_conflicts WHERE status != 'resolved'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                } else {
+                    Ok(0)
+                }
+            })
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
+        (
+            interviews,
+            segments,
+            coded,
+            passage_memos,
+            hub_memos,
+            unsynced,
+            conflicts,
         )
-        .unwrap_or(0) as usize;
-    let coded_segment_count: usize = conn
-        .query_row(
-            "SELECT COUNT(*) FROM coded_segments WHERE deleted = 0",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as usize;
-    let segment_memos: usize = conn
-        .query_row(
-            "SELECT COUNT(*) FROM coded_segments WHERE deleted = 0 AND memo IS NOT NULL AND trim(memo) != ''",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as usize;
-    let interview_memos: usize = conn
-        .query_row(
-            "SELECT COUNT(*) FROM interviews WHERE deleted = 0 AND hub_memo IS NOT NULL AND trim(hub_memo) != ''",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as usize;
+    } else {
+        (0, 0, 0, 0, 0, 0, 0)
+    };
+
+    let mut local_attachments = 0;
+    let interviews_dir = p.join("interviews");
+    if interviews_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&interviews_dir) {
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() {
+                        local_attachments += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let recovery_draft_count = if let Some(rconn) = recovery_conn {
+        let canonical_str = p
+            .canonicalize()
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        let proj_key: Option<String> = rconn
+            .query_row(
+                "SELECT project_key FROM recovery_projects WHERE canonical_path = ?1",
+                params![canonical_str],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if let Some(key) = proj_key {
+            crate::note_recovery::count_active_drafts_for_project(rconn, &key)
+                .map(|c| c as usize)
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let is_completely_read = unreadable_sections.is_empty();
 
     Ok(ProjectDeletionSummary {
         interview_count,
         coded_segment_count,
-        memo_count: segment_memos + interview_memos,
+        memo_count: passage_memo_count + hub_memo_count,
+        segment_count,
+        hub_memo_count,
+        passage_memo_count,
+        unsynced_op_count,
+        conflict_count,
+        recovery_draft_count,
+        local_attachment_count: local_attachments,
+        unreadable_sections,
+        is_completely_read,
     })
 }
 
@@ -4996,8 +5245,7 @@ pub fn is_box_path(path: &Path) -> bool {
 /// 2. Box hard-rule: refuses any path resolving under a Box cloud mount.
 /// 3. Shape guard: refuses unless the folder contains `project.db` or `project.json`.
 /// 4. Attempts trashing via NsFileManager on macOS (avoiding AppleScript/Finder errors like -8013).
-/// 5. Falls back to permanent recursive delete (`remove_dir_all`) if trashing fails,
-///    which unlinks iCloud dataless placeholders without needing downloads.
+/// 5. Strictly Trash-only: if trashing fails, the folder is preserved and an error returned.
 pub fn delete_project_folder_impl(path: &str) -> Result<(), String> {
     let p = Path::new(path);
     if !p.exists() {
@@ -5025,31 +5273,18 @@ pub fn delete_project_folder_impl(path: &str) -> Result<(), String> {
     let trash_result = trash::delete(p);
 
     if let Err(trash_err) = trash_result {
-        // Windows refuses to unlink a file that still has an open handle, and
-        // a just-written project.db routinely has one for a moment -- an
-        // antivirus/indexer scanning it, or a handle the OS has not released
-        // yet. Unix unlinks regardless, which is why this only ever bites on
-        // Windows. Retry briefly before calling it a failure; the same
-        // transient hits real users deleting a study they just closed.
-        let mut perm_result = std::fs::remove_dir_all(p);
-        for attempt in 1..=5 {
-            match &perm_result {
-                Ok(()) => break,
-                Err(_) if p.exists() => {
-                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
-                    perm_result = std::fs::remove_dir_all(p);
-                }
-                Err(_) => break,
-            }
+        if !p.exists() {
+            return Ok(());
         }
-        if let Err(perm_err) = perm_result {
-            if !p.exists() {
-                return Ok(());
-            }
-            return Err(format!(
-                "Could not delete project folder: Trash failed ({trash_err}), and permanent delete fallback failed ({perm_err})."
-            ));
-        }
+        return Err(format!(
+            "Could not move project folder to Trash/Recycle Bin: {trash_err}. The folder has been kept."
+        ));
+    }
+
+    if p.exists() {
+        return Err(
+            "The project folder could not be moved to Trash/Recycle Bin and has been kept.".into(),
+        );
     }
 
     Ok(())

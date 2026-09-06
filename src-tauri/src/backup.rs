@@ -32,7 +32,7 @@
 
 use crate::db;
 use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -68,6 +68,8 @@ pub enum BackupReason {
     Manual,
     /// Taken immediately before a restore overwrote the project. Kept.
     PreRestore,
+    /// Taken to preserve a local copy before removal or migration.
+    Preservation,
 }
 
 impl BackupReason {
@@ -76,6 +78,7 @@ impl BackupReason {
             Self::Automatic => "auto",
             Self::Manual => "manual",
             Self::PreRestore => "pre-restore",
+            Self::Preservation => "preserved",
         }
     }
 }
@@ -97,6 +100,14 @@ pub struct BackupManifest {
     pub interviews: i64,
     pub segments: i64,
     pub coded_segments: i64,
+    #[serde(default)]
+    pub recovery_drafts: Vec<crate::models::NoteDraftRecord>,
+    #[serde(default)]
+    pub local_files: Vec<String>,
+    #[serde(default)]
+    pub external_files: Vec<String>,
+    #[serde(default)]
+    pub external_files_copied: Vec<String>,
 }
 
 /// One row in the restore picker.
@@ -152,6 +163,10 @@ fn build_manifest(
             conn,
             "SELECT COUNT(*) FROM coded_segments WHERE deleted = 0",
         ),
+        recovery_drafts: Vec::new(),
+        local_files: Vec::new(),
+        external_files: Vec::new(),
+        external_files_copied: Vec::new(),
     }
 }
 
@@ -564,6 +579,352 @@ pub fn delete(archive_path: &Path) -> Result<(), String> {
         return Err("That is not a Fleuron backup file.".into());
     }
     fs::remove_file(archive_path).map_err(io_err("Could not delete the backup"))
+}
+
+/// Save a verified recovery archive of `project_path` into `destination_dir`.
+///
+/// Guaranteed:
+/// 1. Destination cannot be inside `project_path`.
+/// 2. WAL content folded in via `VACUUM INTO`.
+/// 3. Manifest extended with local recovery drafts, local project files, and external media references.
+/// 4. Archive integrity verified via SQLite integrity_check before returning success.
+/// 5. Restricted 0o600 file permissions on Unix.
+pub fn save_local_copy(
+    conn: &Connection,
+    project_path: &Path,
+    destination_dir: &Path,
+    include_external_media: bool,
+    recovery_conn: Option<&Connection>,
+) -> Result<BackupInfo, String> {
+    let canon_proj = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
+    let canon_dest = destination_dir
+        .canonicalize()
+        .unwrap_or_else(|_| destination_dir.to_path_buf());
+    if canon_dest.starts_with(&canon_proj) || destination_dir.starts_with(project_path) {
+        return Err(
+            "Archive destination cannot be inside the study folder being preserved.".into(),
+        );
+    }
+
+    fs::create_dir_all(destination_dir)
+        .map_err(io_err("Could not create destination directory"))?;
+
+    let mut manifest = build_manifest(
+        conn,
+        project_path,
+        BackupReason::Preservation,
+        Some("Local copy preserved before removal".into()),
+    );
+
+    if let Some(rconn) = recovery_conn {
+        let canonical_str = canon_proj.to_string_lossy().to_string();
+        let proj_key: Option<String> = rconn
+            .query_row(
+                "SELECT project_key FROM recovery_projects WHERE canonical_path = ?1",
+                params![canonical_str],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if let Some(key) = proj_key {
+            manifest.recovery_drafts =
+                crate::note_recovery::list_active_drafts_for_project(rconn, &key)
+                    .unwrap_or_default();
+        }
+    }
+
+    let mut local_files = Vec::new();
+    for sub in &["interviews", "codebook", "exports"] {
+        let subdir = project_path.join(sub);
+        if subdir.exists() {
+            if let Ok(entries) = fs::read_dir(&subdir) {
+                for entry in entries.flatten() {
+                    if let Ok(ft) = entry.file_type() {
+                        if ft.is_file() {
+                            if let Ok(rel) = entry.path().strip_prefix(project_path) {
+                                local_files.push(rel.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    manifest.local_files = local_files;
+
+    let mut external_refs = Vec::new();
+    let mut external_copied = Vec::new();
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT audio_path, raw_vtt_path FROM interviews WHERE deleted = 0")
+    {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let a: Option<String> = row.get(0)?;
+            let v: Option<String> = row.get(1)?;
+            Ok((a, v))
+        }) {
+            for row in rows.flatten() {
+                for p_str in [row.0, row.1].into_iter().flatten() {
+                    if !p_str.trim().is_empty() {
+                        let p = Path::new(&p_str);
+                        if !p.starts_with(project_path) {
+                            external_refs.push(p_str.clone());
+                            if include_external_media && p.exists() {
+                                external_copied.push(p_str);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    external_refs.sort();
+    external_refs.dedup();
+    external_copied.sort();
+    external_copied.dedup();
+    manifest.external_files = external_refs;
+    manifest.external_files_copied = external_copied;
+
+    let stamp = Utc::now().format("%Y-%m-%d-%H%M%S");
+    let safe_title = manifest
+        .project_title
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    let mut archive_path = destination_dir.join(format!("{safe_title}-{stamp}-preserved.{EXT}"));
+    let mut nth = 2;
+    while archive_path.exists() {
+        archive_path = destination_dir.join(format!("{safe_title}-{stamp}-preserved-{nth}.{EXT}"));
+        nth += 1;
+    }
+
+    let staged_db = destination_dir.join(format!(
+        ".staging-preservation-{stamp}-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let _ = fs::remove_file(&staged_db);
+
+    conn.execute("VACUUM INTO ?1", [staged_db.to_string_lossy().as_ref()])
+        .map_err(|e| {
+            let _ = fs::remove_file(&staged_db);
+            format!("Could not snapshot database for preservation: {e}")
+        })?;
+
+    let file = File::create(&archive_path).map_err(io_err("Could not create archive file"))?;
+    let mut zip = zip::ZipWriter::new(file);
+
+    let db_res = (|| -> Result<(), String> {
+        zip.start_file::<_, ()>(DB_ENTRY, Default::default())
+            .map_err(io_err("Could not write database to archive"))?;
+        let mut db_file = File::open(&staged_db).map_err(io_err("Could not read snapshot"))?;
+        std::io::copy(&mut db_file, &mut zip).map_err(io_err("Could not write database"))?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staged_db);
+    db_res?;
+
+    if let Ok(meta) = fs::read(project_path.join("project.json")) {
+        zip.start_file::<_, ()>(META_ENTRY, Default::default())
+            .map_err(io_err("Could not write metadata"))?;
+        zip.write_all(&meta)
+            .map_err(io_err("Could not write metadata"))?;
+    }
+
+    zip.start_file::<_, ()>(MANIFEST_ENTRY, Default::default())
+        .map_err(io_err("Could not write manifest"))?;
+    let json = serde_json::to_vec_pretty(&manifest).map_err(io_err("Could not encode manifest"))?;
+    zip.write_all(&json)
+        .map_err(io_err("Could not write manifest"))?;
+
+    for rel in &manifest.local_files {
+        let abs = project_path.join(rel);
+        if let Ok(mut f) = File::open(&abs) {
+            let zip_entry_name = format!("files/{}", rel.replace('\\', "/"));
+            if zip
+                .start_file::<_, ()>(&zip_entry_name, Default::default())
+                .is_ok()
+            {
+                let _ = std::io::copy(&mut f, &mut zip);
+            }
+        }
+    }
+
+    for ext_path in &manifest.external_files_copied {
+        let p = Path::new(ext_path);
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            let zip_entry_name = format!("external_media/{name}");
+            if let Ok(mut f) = File::open(p) {
+                if zip
+                    .start_file::<_, ()>(&zip_entry_name, Default::default())
+                    .is_ok()
+                {
+                    let _ = std::io::copy(&mut f, &mut zip);
+                }
+            }
+        }
+    }
+
+    zip.finish().map_err(io_err("Could not finish archive"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&archive_path, fs::Permissions::from_mode(0o600));
+    }
+
+    let verify_staging = destination_dir.join(format!(
+        ".verify-preservation-{stamp}-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let verify_res = extract_and_verify_db(&archive_path, &verify_staging);
+    let _ = fs::remove_file(&verify_staging);
+    if let Err(e) = verify_res {
+        let _ = fs::remove_file(&archive_path);
+        return Err(format!(
+            "Preservation archive integrity verification failed: {e}"
+        ));
+    }
+
+    let size_bytes = fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0);
+    Ok(BackupInfo {
+        path: archive_path.to_string_lossy().to_string(),
+        file_name: archive_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        size_bytes,
+        manifest,
+    })
+}
+
+/// Restore a study backup to a newly allocated project folder.
+pub fn restore_backup_to_new_project(
+    archive_path: &Path,
+    parent_dir: &Path,
+    target_folder_name: Option<&str>,
+    recovery_conn: Option<&Connection>,
+) -> Result<PathBuf, String> {
+    if !archive_path.exists() {
+        return Err("Backup file does not exist.".into());
+    }
+
+    let manifest = read_manifest(archive_path)?;
+
+    let temp_verify = parent_dir.join(format!(
+        ".verify-restore-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(parent_dir).map_err(io_err("Could not access parent directory"))?;
+    let verify_res = extract_and_verify_db(archive_path, &temp_verify);
+    let _ = fs::remove_file(&temp_verify);
+    verify_res?;
+
+    let base_name = if let Some(custom) = target_folder_name.filter(|s| !s.trim().is_empty()) {
+        custom.trim().to_string()
+    } else if !manifest.project_title.trim().is_empty() {
+        manifest.project_title.clone()
+    } else {
+        "Restored Study".to_string()
+    };
+
+    let folder_name = if db::PROJECT_EXTS
+        .iter()
+        .any(|ext| base_name.ends_with(&format!(".{ext}")))
+    {
+        base_name.clone()
+    } else {
+        format!("{}.{}", base_name, db::PROJECT_EXT)
+    };
+
+    let mut target_path = parent_dir.join(&folder_name);
+    let mut nth = 2;
+    let clean_stem = if db::PROJECT_EXTS
+        .iter()
+        .any(|ext| base_name.ends_with(&format!(".{ext}")))
+    {
+        base_name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&base_name)
+    } else {
+        &base_name
+    };
+    while target_path.exists() {
+        target_path = parent_dir.join(format!("{clean_stem}-{nth}.{}", db::PROJECT_EXT));
+        nth += 1;
+    }
+
+    fs::create_dir_all(&target_path).map_err(io_err("Could not create target directory"))?;
+
+    let file = File::open(archive_path).map_err(io_err("Could not open backup archive"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(io_err("Not a readable backup zip"))?;
+
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(io_err("Corrupt archive entry"))?;
+        let entry_name = entry.name().to_string();
+
+        if entry_name == DB_ENTRY {
+            let mut out = File::create(target_path.join(DB_ENTRY))
+                .map_err(io_err("Could not write restored database"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(io_err("Could not write restored database"))?;
+        } else if entry_name == META_ENTRY {
+            let mut out = File::create(target_path.join(META_ENTRY))
+                .map_err(io_err("Could not write restored metadata"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(io_err("Could not write restored metadata"))?;
+        } else if let Some(rel) = entry_name.strip_prefix("files/") {
+            let dest_file = target_path.join(rel);
+            if let Some(p) = dest_file.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+            if let Ok(mut out) = File::create(&dest_file) {
+                let _ = std::io::copy(&mut entry, &mut out);
+            }
+        } else if let Some(rel) = entry_name.strip_prefix("external_media/") {
+            let dest_file = target_path.join("interviews").join(rel);
+            if let Some(p) = dest_file.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+            if let Ok(mut out) = File::create(&dest_file) {
+                let _ = std::io::copy(&mut entry, &mut out);
+            }
+        }
+    }
+
+    let restored_db_path = target_path.join(DB_ENTRY);
+    if let Ok(conn) = Connection::open(&restored_db_path) {
+        let _ = conn.execute(
+            "DELETE FROM sync_state WHERE key IN ('group_bound', 'project_id', 'group_title', 'group_key')",
+            [],
+        );
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('group_bound', '0')",
+            [],
+        );
+    }
+
+    if let Some(rconn) = recovery_conn {
+        if !manifest.recovery_drafts.is_empty() {
+            let canon_path_str = target_path
+                .canonicalize()
+                .unwrap_or_else(|_| target_path.clone())
+                .to_string_lossy()
+                .to_string();
+            if let Ok(new_key) = crate::note_recovery::register_project(
+                rconn,
+                &canon_path_str,
+                &manifest.project_title,
+            ) {
+                for draft in &manifest.recovery_drafts {
+                    let mut remapped = draft.clone();
+                    remapped.project_key = new_key.clone();
+                    let _ = crate::note_recovery::restore_draft_record(rconn, &remapped);
+                }
+            }
+        }
+    }
+
+    Ok(target_path)
 }
 
 #[cfg(test)]

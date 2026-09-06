@@ -53,27 +53,34 @@ export function SpeakerPickerPopover({
     return allSegments.slice(targetIdx + 1).some((s) => s.speaker === segment.speaker);
   }, [allSegments, targetIdx, segment.speaker]);
 
-  // Position calculation
+  // Position calculation with vertical clamping
   const pos = useMemo(() => {
     const gap = 6;
     const popoverWidth = 260;
+    const estimatedHeight = 280;
     const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
     let left = anchorRect.left;
     if (left + popoverWidth > viewportWidth - 16) {
       left = Math.max(16, viewportWidth - popoverWidth - 16);
     }
-    const top = anchorRect.bottom + gap;
+    let top = anchorRect.bottom + gap;
+    if (top + estimatedHeight > viewportHeight - 16 && anchorRect.top - estimatedHeight - gap > 16) {
+      top = Math.max(16, anchorRect.top - estimatedHeight - gap);
+    }
     return { top, left };
   }, [anchorRect]);
 
   // Outside click and Escape
   useEffect(() => {
     const handleDown = (e: MouseEvent) => {
+      if (busy) return;
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
     const handleKey = (e: KeyboardEvent) => {
+      if (busy) return;
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
@@ -85,7 +92,7 @@ export function SpeakerPickerPopover({
       window.removeEventListener("mousedown", handleDown, true);
       window.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [onClose, busy]);
 
   const handleSelectSpeaker = async (rawSpeaker: string) => {
     const trimmed = rawSpeaker.trim();

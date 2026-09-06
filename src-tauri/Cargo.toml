@@ -1,6 +1,6 @@
 [package]
 name = "qualitative-coding-app"
-version = "2.6.0"
+version = "2.7.0"
 description = "Offline qualitative coding for reflexive thematic analysis"
 authors = ["Fleuron contributors"]
 license = "MIT"

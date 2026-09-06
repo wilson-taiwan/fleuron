@@ -166,6 +166,16 @@ interface ProjectStore {
     includeFollowing: boolean,
   ) => Promise<void>;
   restoreSegmentSpeakers: (changes: SegmentSpeakerChange[]) => Promise<void>;
+  renameInterviewSpeaker: (
+    interviewId: string,
+    oldSpeaker: string,
+    newSpeaker: string,
+    expectedCount?: number,
+  ) => Promise<SegmentSpeakerChange[]>;
+  undoRenameInterviewSpeaker: (
+    interviewId: string,
+    changes: SegmentSpeakerChange[],
+  ) => Promise<void>;
   interviewHistory: Array<{ interviewId: string; selectedSegmentId: string | null }>;
   historyCursor: number;
   goBackInterview: () => Promise<void>;
@@ -1554,6 +1564,88 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       get().showStatus("Speaker changes undone.");
     } catch (e) {
       get().showStatus("Could not undo speaker changes: " + String(e), "error");
+      throw e;
+    }
+  },
+
+  renameInterviewSpeaker: async (interviewId, oldSpeaker, newSpeaker, expectedCount) => {
+    const drafts = useNoteDraftStore.getState();
+    const project_key = drafts.workspace?.projectKey;
+    const epoch = drafts.workspace?.epoch;
+    try {
+      const changes = await api.renameInterviewSpeaker({
+        project_key,
+        epoch,
+        interview_id: interviewId,
+        old_speaker: oldSpeaker,
+        new_speaker: newSpeaker,
+        expected_count: expectedCount,
+      });
+
+      if (get().activeInterviewId === interviewId) {
+        set((state) => {
+          const changeMap = new Map(
+            changes.map((c) => [c.segment_id, c.new_speaker]),
+          );
+          const nextSegments = state.segments.map((seg) => {
+            const updated = changeMap.get(seg.id);
+            return updated !== undefined ? { ...seg, speaker: updated } : seg;
+          });
+          const nextFilter =
+            state.speakerFilter === oldSpeaker ? newSpeaker : state.speakerFilter;
+          return { segments: nextSegments, speakerFilter: nextFilter };
+        });
+      }
+
+      get().showStatus(
+        `Renamed "${oldSpeaker}" to "${newSpeaker}" across ${changes.length} turn${changes.length === 1 ? "" : "s"}.`,
+        "success",
+        {
+          label: "Undo",
+          onClick: () => {
+            void get().undoRenameInterviewSpeaker(interviewId, changes);
+          },
+        },
+        8000,
+      );
+      return changes;
+    } catch (e) {
+      get().showStatus("Could not rename speaker: " + String(e), "error");
+      throw e;
+    }
+  },
+
+  undoRenameInterviewSpeaker: async (interviewId, changes) => {
+    const drafts = useNoteDraftStore.getState();
+    const project_key = drafts.workspace?.projectKey;
+    const epoch = drafts.workspace?.epoch;
+    try {
+      await api.undoRenameInterviewSpeaker({
+        project_key,
+        epoch,
+        interview_id: interviewId,
+        changes,
+      });
+
+      if (get().activeInterviewId === interviewId) {
+        set((state) => {
+          const changeMap = new Map(
+            changes.map((c) => [c.segment_id, c.old_speaker]),
+          );
+          const nextSegments = state.segments.map((seg) => {
+            const prev = changeMap.get(seg.id);
+            return prev !== undefined ? { ...seg, speaker: prev } : seg;
+          });
+          const restoredSpeaker = changes[0]?.old_speaker;
+          const newSpeaker = changes[0]?.new_speaker;
+          const nextFilter =
+            state.speakerFilter === newSpeaker ? restoredSpeaker : state.speakerFilter;
+          return { segments: nextSegments, speakerFilter: nextFilter };
+        });
+      }
+      get().showStatus("Speaker rename undone.");
+    } catch (e) {
+      get().showStatus("Could not undo speaker rename: " + String(e), "error");
       throw e;
     }
   },

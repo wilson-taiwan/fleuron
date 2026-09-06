@@ -71,6 +71,9 @@ supabase test db --local supabase/tests/sync-v2.pgtap.sql
 echo "── pgTAP: entitlements …"
 supabase test db --local supabase/tests/entitlements.pgtap.sql
 
+echo "── pgTAP: study-lifecycle …"
+supabase test db --local supabase/tests/study-lifecycle.pgtap.sql
+
 echo "── Static migration gate …"
 bash scripts/verify-supabase-migrations.sh
 

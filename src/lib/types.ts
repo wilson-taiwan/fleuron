@@ -477,6 +477,11 @@ export interface SegmentSpeakerChange {
   new_speaker: string;
 }
 
+export interface InterviewSpeakerSummary {
+  speaker: string;
+  turn_count: number;
+}
+
 export interface OpenStage {
   step: number;
   total: number;
@@ -638,10 +643,31 @@ export interface LiveWorkspaceSnapshot {
 
 export type JoinTargetVerdict =
   | { verdict: "already_set_up_here"; path: string }
+  | { verdict: "ready"; path: string }
+  | { verdict: "reconnectable"; path: string }
   | { verdict: "adoptable_unbound"; path: string }
   | { verdict: "bound_elsewhere"; path: string; suggested_name: string; suggested_path: string }
+  | { verdict: "unrelated_collision"; path: string; suggested_name: string; suggested_path: string }
   | { verdict: "occupied"; path: string; suggested_name: string; suggested_path: string }
-  | { verdict: "available"; suggested_name: string; suggested_path: string };
+  | { verdict: "available"; suggested_name: string; suggested_path: string }
+  | { verdict: "unavailable"; path: string; reason: string }
+  | { verdict: "ambiguous"; paths: string[] }
+  | { verdict: "invalid"; path: string; reason: string };
+
+export interface ProjectDeletionSummary {
+  interview_count: number;
+  coded_segment_count: number;
+  memo_count: number;
+  segment_count?: number;
+  hub_memo_count?: number;
+  passage_memo_count?: number;
+  unsynced_op_count?: number;
+  conflict_count?: number;
+  recovery_draft_count?: number;
+  local_attachment_count?: number;
+  unreadable_sections?: string[];
+  is_completely_read?: boolean;
+}
 
 export type StudyLocation =
   | { state: "reachable" }

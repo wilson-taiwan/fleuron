@@ -161,6 +161,30 @@ pub struct SegmentSpeakerChange {
     pub new_speaker: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterviewSpeakerSummary {
+    pub speaker: String,
+    pub turn_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameInterviewSpeakerInput {
+    pub project_key: Option<String>,
+    pub epoch: Option<String>,
+    pub interview_id: String,
+    pub old_speaker: String,
+    pub new_speaker: String,
+    pub expected_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoRenameInterviewSpeakerInput {
+    pub project_key: Option<String>,
+    pub epoch: Option<String>,
+    pub interview_id: String,
+    pub changes: Vec<SegmentSpeakerChange>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodedSegment {
     pub id: String,
@@ -309,10 +333,21 @@ pub enum JoinTargetVerdict {
     AlreadySetUpHere {
         path: String,
     },
+    Ready {
+        path: String,
+    },
+    Reconnectable {
+        path: String,
+    },
     AdoptableUnbound {
         path: String,
     },
     BoundElsewhere {
+        path: String,
+        suggested_name: String,
+        suggested_path: String,
+    },
+    UnrelatedCollision {
         path: String,
         suggested_name: String,
         suggested_path: String,
@@ -325,6 +360,17 @@ pub enum JoinTargetVerdict {
     Available {
         suggested_name: String,
         suggested_path: String,
+    },
+    Unavailable {
+        path: String,
+        reason: String,
+    },
+    Ambiguous {
+        paths: Vec<String>,
+    },
+    Invalid {
+        path: String,
+        reason: String,
     },
 }
 
@@ -675,6 +721,24 @@ pub struct ProjectDeletionSummary {
     pub interview_count: usize,
     pub coded_segment_count: usize,
     pub memo_count: usize,
+    #[serde(default)]
+    pub segment_count: usize,
+    #[serde(default)]
+    pub hub_memo_count: usize,
+    #[serde(default)]
+    pub passage_memo_count: usize,
+    #[serde(default)]
+    pub unsynced_op_count: usize,
+    #[serde(default)]
+    pub conflict_count: usize,
+    #[serde(default)]
+    pub recovery_draft_count: usize,
+    #[serde(default)]
+    pub local_attachment_count: usize,
+    #[serde(default)]
+    pub unreadable_sections: Vec<String>,
+    #[serde(default)]
+    pub is_completely_read: bool,
 }
 
 // ── Note drafts: local crash recovery + checked writes ──────────────────────
