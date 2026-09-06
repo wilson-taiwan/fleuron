@@ -5270,7 +5270,20 @@ pub fn delete_project_folder_impl(path: &str) -> Result<(), String> {
     };
 
     #[cfg(not(target_os = "macos"))]
-    let trash_result = trash::delete(p);
+    let trash_result = {
+        // Windows refuses to move/unlink a folder if a file inside still has an open handle
+        // (e.g. SQLite checkpointing, antivirus/indexer scanning a freshly closed project.db).
+        // Retry briefly before giving up to allow file locks to clear.
+        let mut res = trash::delete(p);
+        for attempt in 1..=6 {
+            if res.is_ok() || !p.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150 * attempt));
+            res = trash::delete(p);
+        }
+        res
+    };
 
     if let Err(trash_err) = trash_result {
         if !p.exists() {

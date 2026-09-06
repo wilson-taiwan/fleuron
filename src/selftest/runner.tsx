@@ -23,6 +23,8 @@ async function disposeStudy(path: string): Promise<void> {
   } catch {
     // Already closed is fine — the deletion below is what matters.
   }
+  // Brief delay to allow OS file handles and SQLite locks to fully release on Windows
+  await new Promise((resolve) => setTimeout(resolve, 150));
   await api.deleteProjectFolder(path);
 }
 
@@ -305,7 +307,6 @@ export function SelftestRunner() {
       // Suite 9: study-lifecycle
       await runSuite("study-lifecycle", async () => {
         const seedPath = await seedFreshStudy("study-lifecycle");
-        await disposeStudy(seedPath); // keep only this suite's own fixture
         const parentDir = seedPath.replace(/[\\/][^\\/]+$/, "");
         let projectPath = "";
         try {
@@ -338,6 +339,7 @@ export function SelftestRunner() {
           if (projectPath) {
             await disposeStudy(projectPath);
           }
+          await disposeStudy(seedPath);
           try {
             await api.readTextFile(`${projectPath}/project.db`);
             throw new Error("study folder still exists after delete");

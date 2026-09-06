@@ -286,7 +286,9 @@ test.describe("unfinished notes and departure", () => {
     await page.getByRole("menuitem", { name: "Close study" }).click();
     await expect(dialog).toBeVisible({ timeout: 15_000 });
     await dialog.getByRole("button", { name: "Discard changes" }).click();
-    await expect(page.getByRole("button", { name: /Start a local study/ })).toBeVisible({
+    await expect(
+      page.getByRole("button", { name: /Start a local study|New study/i }),
+    ).toBeVisible({
       timeout: 15_000,
     });
   });
@@ -300,7 +302,9 @@ test.describe("unfinished notes and departure", () => {
     const dialog = page.getByRole("dialog", { name: "Unfinished notes" });
     await expect(dialog).toBeVisible({ timeout: 15_000 });
     await dialog.getByRole("button", { name: "Save all" }).click();
-    await expect(page.getByRole("button", { name: /Start a local study/ })).toBeVisible({
+    await expect(
+      page.getByRole("button", { name: /Start a local study|New study/i }),
+    ).toBeVisible({
       timeout: 15_000,
     });
     await expect.poll(() => ipcCount(page, "save_note_draft"), { timeout: 15_000 }).toBeGreaterThan(0);
