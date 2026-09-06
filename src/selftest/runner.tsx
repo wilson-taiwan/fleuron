@@ -1021,14 +1021,25 @@ export function SelftestRunner() {
             char_end: 18,
           });
 
+          await store.loadCodes();
+          await store.loadCodedSegments();
+
           store.openNoteForCoding(first.coded_segment.id);
           store.openNoteForCoding(second.coded_segment.id);
-          const boxes = () =>
-            document.querySelectorAll('[aria-label="Note content"]');
-          assert(boxes().length <= 1, `expected at most one editor, found ${boxes().length}`);
-          const box = boxes()[0];
-          assert(box instanceof HTMLElement, "expected the single editor in the DOM");
-          (box as HTMLElement).focus();
+          let box: HTMLTextAreaElement | null = null;
+          for (let i = 0; i < 40; i++) {
+            const boxes = document.querySelectorAll<HTMLTextAreaElement>(
+              'textarea[aria-label="Note content"]',
+            );
+            assert(boxes.length <= 1, `expected at most one editor, found ${boxes.length}`);
+            if (boxes.length === 1 && !boxes[0].disabled) {
+              box = boxes[0];
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          assert(box instanceof HTMLElement, "expected enabled note editor textarea in the DOM");
+          box.focus();
           assert(
             document.activeElement?.getAttribute("aria-label") === "Note content",
             "keyboard focus must land in the single editor",
