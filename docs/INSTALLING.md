@@ -1,11 +1,11 @@
 # Installing Fleuron
 
 > **Publisher verification notice**
-> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from `https://fleuron.study` or the official release page at `https://github.com/wilson-taiwan/fleuron/releases`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.
+> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from `https://fleuron.study` or the official release page at `https://github.com/wilsonhyeh/fleuron/releases`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.
 
 ## Choose your file
 
-Fleuron is distributed from `https://fleuron.study` and the [official Releases page](https://github.com/wilson-taiwan/fleuron/releases); website buttons link directly to binaries hosted on that release page.
+Fleuron is distributed from `https://fleuron.study` and the [official Releases page](https://github.com/wilsonhyeh/fleuron/releases); website buttons link directly to binaries hosted on that release page.
 Only these two files are manual downloads:
 
 | Your computer | Download this exact file |
@@ -18,7 +18,7 @@ You may also see these on a release page. They are **updater infrastructure — 
 
 ## Three checks before you continue
 
-1. **Official source:** you are on `https://fleuron.study` or `https://github.com/wilson-taiwan/fleuron/releases`, and the download link points to `github.com/wilson-taiwan/fleuron/releases`, not a mirror or ad link.
+1. **Official source:** you are on `https://fleuron.study` or `https://github.com/wilsonhyeh/fleuron/releases`, and the download link points to `github.com/wilsonhyeh/fleuron/releases`, not a mirror or ad link.
 2. **Version and filename:** the file matches the exact name above for your platform.
 3. **Expected warning:** the warning your OS shows matches the *expected* text below.
 
@@ -42,7 +42,7 @@ Open Anyway stays available after the first run unless macOS re-prompts after an
 
 | You see | What it means | What to do |
 | --- | --- | --- |
-| macOS says the app is **damaged**, or “will damage your computer”, or a malware alert | Not the ordinary unsigned warning | Stop. Delete the download. Compare the SHA-256 digest below; if an official re-download repeats it, [file an install issue](https://github.com/wilson-taiwan/fleuron/issues/new?template=install-help.yml) from a safe device |
+| macOS says the app is **damaged**, or “will damage your computer”, or a malware alert | Not the ordinary unsigned warning | Stop. Delete the download. Compare the SHA-256 digest below; if an official re-download repeats it, [file an install issue](https://github.com/wilsonhyeh/fleuron/issues/new?template=install-help.yml) from a safe device |
 | Microsoft Defender reports a threat or quarantines the installer | Real security signal pending investigation | Stop. Do not restore or allow the file. Save the exact warning text and file an issue |
 | A UAC / administrator prompt appears during install | Fleuron installs per-user; this should never happen | Cancel. Do not enter credentials. File an install issue |
 | **Smart App Control** blocks the app | No per-app bypass exists | Stop. Do not disable Smart App Control |
@@ -72,14 +72,14 @@ shasum -a 256 Fleuron_2.4.0_universal.dmg
 Verify against the published `SHA256SUMS.txt` on the release page:
 
 ```bash
-gh release download v2.4.0 --repo wilson-taiwan/fleuron --dir .
+gh release download v2.4.0 --repo wilsonhyeh/fleuron --dir .
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
 Artifact attestation proves which public repository, workflow, and commit produced each asset:
 
 ```bash
-gh attestation verify Fleuron_2.4.0_universal.dmg --repo wilson-taiwan/fleuron
+gh attestation verify Fleuron_2.4.0_universal.dmg --repo wilsonhyeh/fleuron
 ```
 
 These checks help verify file integrity and build provenance. They do not establish software safety or replace an OS publisher identity.
@@ -96,4 +96,4 @@ If you encounter unexpected behavior or errors:
 
 ## Still stuck?
 
-[Open an install-help issue](https://github.com/wilson-taiwan/fleuron/issues/new?template=install-help.yml). Do not attach transcripts, quotes, participant/study identifiers, project databases, tokens, or unredacted crash logs/screenshots.
+[Open an install-help issue](https://github.com/wilsonhyeh/fleuron/issues/new?template=install-help.yml). Do not attach transcripts, quotes, participant/study identifiers, project databases, tokens, or unredacted crash logs/screenshots.

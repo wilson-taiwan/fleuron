@@ -237,14 +237,14 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          BASE="https://github.com/wilson-taiwan/fleuron/releases/download/${TAG}"
+          BASE="https://github.com/wilsonhyeh/fleuron/releases/download/${TAG}"
           MAC_SIG="$(cat assets/Fleuron_universal.app.tar.gz.sig)"
           WIN_SIG="$(cat assets/Fleuron_${VERSION}_x64-setup.exe.sig)"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > assets/latest.json <<JSON
           {
             "version": "${VERSION}",
-            "notes": "See https://github.com/wilson-taiwan/fleuron/blob/main/CHANGELOG.md for release notes.",
+            "notes": "See https://github.com/wilsonhyeh/fleuron/blob/main/CHANGELOG.md for release notes.",
             "pub_date": "${PUB_DATE}",
             "platforms": {
               "darwin-aarch64": { "signature": "${MAC_SIG}", "url": "${BASE}/Fleuron_universal.app.tar.gz" },
@@ -280,7 +280,7 @@ jobs:
           {
             echo "**Publisher verification notice**"
             echo ""
-            echo "> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at \`https://github.com/wilson-taiwan/fleuron/releases\`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop."
+            echo "> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at \`https://github.com/wilsonhyeh/fleuron/releases\`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop."
             echo ""
             echo "| Your computer | Manual download |"
             echo "| --- | --- |"
@@ -347,14 +347,14 @@ jobs:
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           EXPECTED="Fleuron_${VERSION}_universal.dmg Fleuron_${VERSION}_x64-setup.exe Fleuron_${VERSION}_x64-setup.exe.sig Fleuron_universal.app.tar.gz Fleuron_universal.app.tar.gz.sig latest.json"
-          VIEW="$(gh release view "$TAG" --repo wilson-taiwan/fleuron --json isDraft,isPrerelease,targetCommitish)"
+          VIEW="$(gh release view "$TAG" --repo wilsonhyeh/fleuron --json isDraft,isPrerelease,targetCommitish)"
           echo "$VIEW" | grep -q '"isDraft":true' || { echo "release must be a draft"; exit 1; }
           echo "$VIEW" | grep -q '"isPrerelease":false' || { echo "must not be a prerelease"; exit 1; }
           # NOT `gh api .../releases/tags/$TAG`: the REST "get release by tag"
           # endpoint does not resolve DRAFT releases and 404s. Every release
           # this workflow makes is a draft, so that call could never succeed.
           # `gh release view` reads drafts.
-          NAMES="$(gh release view "$TAG" --repo wilson-taiwan/fleuron --json assets --jq '.assets[].name' | tr '\n' ' ')"
+          NAMES="$(gh release view "$TAG" --repo wilsonhyeh/fleuron --json assets --jq '.assets[].name' | tr '\n' ' ')"
           for want in $EXPECTED; do
             grep -qw "$want" <<<"$NAMES" || { echo "missing asset: $want"; exit 1; }
           done
@@ -368,9 +368,9 @@ jobs:
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           # Same reason as above: drafts are invisible to the by-tag endpoint.
-          gh release view "$TAG" --repo wilson-taiwan/fleuron --json assets \
+          gh release view "$TAG" --repo wilsonhyeh/fleuron --json assets \
             --jq '.assets[]|select(.name=="latest.json")|.name' | grep -q latest.json
-          gh release download "$TAG" --repo wilson-taiwan/fleuron --pattern 'latest.json' --dir _lj --clobber
+          gh release download "$TAG" --repo wilsonhyeh/fleuron --pattern 'latest.json' --dir _lj --clobber
           node -e '
             const fs=require("fs");
             const j=JSON.parse(fs.readFileSync("_lj/latest.json","utf8"));
@@ -380,7 +380,7 @@ jobs:
             const plat=["darwin-aarch64","darwin-x86_64","windows-x86_64"];
             for(const p of plat){ if(!j.platforms[p]) throw new Error("missing platform "+p); }
             for(const p of Object.values(j.platforms)){
-              if(!p.url.startsWith(`https://github.com/wilson-taiwan/fleuron/releases/download/${tag}/`)) throw new Error("bad url "+p.url);
+              if(!p.url.startsWith(`https://github.com/wilsonhyeh/fleuron/releases/download/${tag}/`)) throw new Error("bad url "+p.url);
               if(typeof p.signature!=="string"||p.signature.length<40) throw new Error("bad signature");
             }
             console.log("latest.json OK");
@@ -402,7 +402,7 @@ jobs:
             test -f "$f" || { echo "missing local copy: $f"; exit 1; }
             shasum -a 256 "$f"
           done > SHA256SUMS.raw.txt
-          gh release download "$TAG" --repo wilson-taiwan/fleuron --pattern 'latest.json' --dir . --clobber
+          gh release download "$TAG" --repo wilsonhyeh/fleuron --pattern 'latest.json' --dir . --clobber
           shasum -a 256 latest.json >> SHA256SUMS.raw.txt
           LC_ALL=C sort -k2 SHA256SUMS.raw.txt -o SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -419,6 +419,6 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release upload "$TAG" verify/SHA256SUMS.txt --clobber
-          STILL_DRAFT="$(gh release view "$TAG" --repo wilson-taiwan/fleuron --json isDraft --jq .isDraft)"
+          STILL_DRAFT="$(gh release view "$TAG" --repo wilsonhyeh/fleuron --json isDraft --jq .isDraft)"
           test "$STILL_DRAFT" = "true" || { echo "refusing: release left draft state"; exit 1; }
           echo "✓ checksums attested + attached; release remains a DRAFT — no automation publishes it"

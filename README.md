@@ -24,9 +24,9 @@ Built with **Tauri v2**, **React 19**, **TypeScript**, **Tailwind CSS**, and **S
 
 ### Installation
 
-Downloads are distributed from [fleuron.study](https://fleuron.study/) and the [official Releases page](https://github.com/wilson-taiwan/fleuron/releases/latest) (with website downloads pointing directly at files hosted on the GitHub release page). Full step-by-step guidance — including the **expected first-launch warnings** for unsigned-but-official builds and the "stop here" signals — lives in [docs/INSTALLING.md](docs/INSTALLING.md):
+Downloads are distributed from [fleuron.study](https://fleuron.study/) and the [official Releases page](https://github.com/wilsonhyeh/fleuron/releases/latest) (with website downloads pointing directly at files hosted on the GitHub release page). Full step-by-step guidance — including the **expected first-launch warnings** for unsigned-but-official builds and the "stop here" signals — lives in [docs/INSTALLING.md](docs/INSTALLING.md):
 
-> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from `https://fleuron.study/` or the official release page at `https://github.com/wilson-taiwan/fleuron/releases`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.
+> Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from `https://fleuron.study/` or the official release page at `https://github.com/wilsonhyeh/fleuron/releases`. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.
 
 | Platform | File |
 | --- | --- |
@@ -79,7 +79,7 @@ Project Folder (my-study.fleuron/)
 
 ```bash
 # Clone repository
-git clone https://github.com/wilson-taiwan/fleuron.git
+git clone https://github.com/wilsonhyeh/fleuron.git
 cd fleuron
 
 # Install frontend dependencies

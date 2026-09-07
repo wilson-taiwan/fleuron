@@ -13,7 +13,7 @@ The QA runner is written in pure PowerShell 5.1 (standard with Windows 11) with 
 To verify a specific release, check out that release's tag and use the `qa/` directory from that commit:
 
 ```
-https://github.com/wilson-taiwan/fleuron/archive/refs/tags/v<version>.zip
+https://github.com/wilsonhyeh/fleuron/archive/refs/tags/v<version>.zip
 ```
 
 The runner derives the expected version from a canonical `Fleuron_X.Y.Z_x64-setup.exe` filename, or accepts `-ExpectedVersion X.Y.Z`. (A `release.json` beside the script also pins it, but nothing generates one any more.)

@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability (private)
-    url: https://github.com/wilson-taiwan/fleuron/security
+    url: https://github.com/wilsonhyeh/fleuron/security
     about: Confidential reports through GitHub's Report a vulnerability flow only — never a public issue.
   - name: Install guide
-    url: https://github.com/wilson-taiwan/fleuron/blob/main/docs/INSTALLING.md
+    url: https://github.com/wilsonhyeh/fleuron/blob/main/docs/INSTALLING.md
     about: Canonical downloads, expected OS warnings, and the three checks before installing.

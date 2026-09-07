@@ -2169,10 +2169,10 @@ pub fn get_app_version(app: tauri::AppHandle) -> Result<AppVersionInfo, String> 
         version: info.version.to_string(),
         copyright: Some("Fleuron contributors".into()),
         build_commit: Some(build_commit),
-        source_url: Some("https://github.com/wilson-taiwan/fleuron".into()),
-        release_url: Some("https://github.com/wilson-taiwan/fleuron/releases".into()),
+        source_url: Some("https://github.com/wilsonhyeh/fleuron".into()),
+        release_url: Some("https://github.com/wilsonhyeh/fleuron/releases".into()),
         install_guide_url: Some(
-            "https://github.com/wilson-taiwan/fleuron/blob/main/docs/INSTALLING.md".into(),
+            "https://github.com/wilsonhyeh/fleuron/blob/main/docs/INSTALLING.md".into(),
         ),
     })
 }

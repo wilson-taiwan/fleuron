@@ -36,7 +36,7 @@ Capabilities Fleuron **does not request**: camera, microphone, screen recording,
 
 | Purpose | Endpoint | Protocol | Default |
 | --- | --- | --- | --- |
-| Update checks at startup and every four hours | api.github.com (wilson-taiwan/fleuron releases) | Outbound HTTPS | On; disable in Settings → Update checks |
+| Update checks at startup and every four hours | api.github.com (wilsonhyeh/fleuron releases) | Outbound HTTPS | On; disable in Settings → Update checks |
 | Update download/install after you approve | github.com releases | Outbound HTTPS | Only on your action |
 | Sign-in, session renewal and collaboration (account + study/codebook/coding metadata) | Configured Supabase service | Outbound HTTPS/WSS | Only when collaborating |
 

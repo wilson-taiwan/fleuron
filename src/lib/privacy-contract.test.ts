@@ -105,7 +105,7 @@ describe("Protocol 2 wire allowlist is fully disclosed", () => {
     expect(disclosure).toContain(
       "so your operating system cannot verify its publisher automatically",
     );
-    expect(disclosure).toContain("Download only from the official release page at https://github.com/wilson-taiwan/fleuron/releases");
+    expect(disclosure).toContain("Download only from the official release page at https://github.com/wilsonhyeh/fleuron/releases");
     expect(disclosure).toContain("A malware warning, checksum mismatch, or unexpected administrator request means stop.");
   });
 });

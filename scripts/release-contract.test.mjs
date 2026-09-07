@@ -29,7 +29,7 @@ const CANONICAL_WIN_EXE = "Fleuron_" + RELEASE_VERSION + "_x64-setup.exe";
 // %USERPROFILE%\Fleuron / ~/Fleuron -- the default study library -- with no
 // confirmation prompt, so a researcher who downloads one from a release page
 // loses their coding. Match a release to its runner by checking out the tag
-// instead: github.com/wilson-taiwan/fleuron/archive/refs/tags/v<version>.zip
+// instead: github.com/wilsonhyeh/fleuron/archive/refs/tags/v<version>.zip
 const MAC_QA_RUNNER_TEMPLATE = "Fleuron_" + VERSION_TOKEN + "_macos-qa-runner.zip";
 const WIN_QA_RUNNER_TEMPLATE = "Fleuron_" + VERSION_TOKEN + "_windows-qa-runner.zip";
 const DISCLOSURE_SNIPPET =
@@ -390,7 +390,7 @@ test("updater channel is retained verbatim", () => {
   const updater = conf.plugins?.updater;
   assert.ok(updater?.pubkey, "updater pubkey missing");
   assert.deepEqual(updater.endpoints, [
-    "https://github.com/wilson-taiwan/fleuron/releases/latest/download/latest.json",
+    "https://github.com/wilsonhyeh/fleuron/releases/latest/download/latest.json",
   ]);
 });
 
@@ -445,7 +445,7 @@ test("canonical publisher disclosure is carried verbatim by INSTALLING + README"
     const text = readFile(p);
     assert.ok(text.includes(DISCLOSURE_SNIPPET), `${p} lost the canonical notice`);
     assert.ok(
-      text.includes("https://github.com/wilson-taiwan/fleuron/releases"),
+      text.includes("https://github.com/wilsonhyeh/fleuron/releases"),
       `${p} must name the official releases URL`,
     );
   }

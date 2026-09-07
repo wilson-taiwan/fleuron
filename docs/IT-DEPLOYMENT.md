@@ -24,7 +24,7 @@ Fleuron is a solo-maintained, open-source desktop application for qualitative co
 - Every release includes GitHub artifact attestations and a sorted `SHA256SUMS.txt`; verify with:
 
 ```bash
-gh attestation verify Fleuron_2.0.1_x64-setup.exe --repo wilson-taiwan/fleuron
+gh attestation verify Fleuron_2.0.1_x64-setup.exe --repo wilsonhyeh/fleuron
 shasum -a 256 -c SHA256SUMS.txt   # or sha256sum -c on Linux
 ```
 

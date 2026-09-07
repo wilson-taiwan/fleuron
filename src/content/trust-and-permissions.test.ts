@@ -23,7 +23,7 @@ import {
 describe("publisher verification notice", () => {
   it("matches the canonical wording exactly", () => {
     expect(PUBLISHER_VERIFICATION_NOTICE).toBe(
-      "Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at https://github.com/wilson-taiwan/fleuron/releases. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.",
+      "Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at https://github.com/wilsonhyeh/fleuron/releases. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.",
     );
   });
 

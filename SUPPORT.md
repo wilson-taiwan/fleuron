@@ -6,8 +6,8 @@ Fleuron is maintained by one person, so support runs entirely through GitHub —
 
 Open a GitHub Issue using the guided forms:
 
-- **Install help:** [New install-help issue](https://github.com/wilson-taiwan/fleuron/issues/new?template=install-help.yml)
-- **Bug report:** [New bug-report issue](https://github.com/wilson-taiwan/fleuron/issues/new?template=bug-report.yml)
+- **Install help:** [New install-help issue](https://github.com/wilsonhyeh/fleuron/issues/new?template=install-help.yml)
+- **Bug report:** [New bug-report issue](https://github.com/wilsonhyeh/fleuron/issues/new?template=bug-report.yml)
 
 Forms collect OS version/build, Fleuron version and build commit (About → Copy build details), the exact filename and download URL, and the exact warning text.
 
@@ -19,7 +19,7 @@ To provide diagnostics safely:
 
 ## Security vulnerabilities
 
-Please report privately through GitHub's **Report a vulnerability** flow on the repository ([security advisories → report](https://github.com/wilson-taiwan/fleuron/security)). See [SECURITY.md](SECURITY.md). Do not open public issues for security reports.
+Please report privately through GitHub's **Report a vulnerability** flow on the repository ([security advisories → report](https://github.com/wilsonhyeh/fleuron/security)). See [SECURITY.md](SECURITY.md). Do not open public issues for security reports.
 
 ## Deployment questions for IT
 

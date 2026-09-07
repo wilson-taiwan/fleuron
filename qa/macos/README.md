@@ -7,7 +7,7 @@ This runner verifies the matching Fleuron DMG without installing the app or bypa
 **This runner is a maintainer tool and is deliberately not published as a release asset.** To verify a specific release, check out that release's tag and use the `qa/macos/` directory from that commit:
 
 ```
-https://github.com/wilson-taiwan/fleuron/archive/refs/tags/v<version>.zip
+https://github.com/wilsonhyeh/fleuron/archive/refs/tags/v<version>.zip
 ```
 
 A `release.json` beside `Invoke-FleuronQA.sh` still pins the expected release version and rejects a canonical DMG filename for a different release, but nothing generates one any more.

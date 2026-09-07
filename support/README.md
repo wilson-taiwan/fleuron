@@ -38,4 +38,4 @@ powershell -NoProfile -File support\Get-FleuronProbe.ps1 -Help
 
 Always inspect the generated diagnostic text file before attaching it to a GitHub issue:
 - Verify that only general system information and truncated crash logs are included.
-- Attach the file to your [install-help issue](https://github.com/wilson-taiwan/fleuron/issues/new?template=install-help.yml).
+- Attach the file to your [install-help issue](https://github.com/wilsonhyeh/fleuron/issues/new?template=install-help.yml).

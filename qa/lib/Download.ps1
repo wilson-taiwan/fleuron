@@ -35,7 +35,7 @@ function Get-PreviousReleaseInstaller {
     $fileName = "Fleuron_${Version}_x64-setup.exe"
 
     $destPath = Join-Path $DownloadDirectory $fileName
-    $downloadUrl = "https://github.com/wilson-taiwan/fleuron/releases/download/v${Version}/${fileName}"
+    $downloadUrl = "https://github.com/wilsonhyeh/fleuron/releases/download/v${Version}/${fileName}"
 
     Write-Host "Downloading previous installer v${Version} from $downloadUrl..."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()

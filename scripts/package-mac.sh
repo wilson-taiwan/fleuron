@@ -115,7 +115,7 @@ cat <<EOF
   Updater:      releases/${PRODUCT_NAME}-${VERSION}-mac.app.tar.gz[.sig]
 
 Canonical distribution is the GitHub Releases page:
-  https://github.com/wilson-taiwan/fleuron/releases
+  https://github.com/wilsonhyeh/fleuron/releases
 Upload this artifact through a candidate workflow rather than sharing files
 by hand — the release page, exact filename, and version are part of how users
 verify they have the official download.

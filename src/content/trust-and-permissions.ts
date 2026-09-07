@@ -24,7 +24,7 @@ import { isMac } from "../lib/platform";
 // Official URLs
 // ---------------------------------------------------------------------------
 
-const REPO = "https://github.com/wilson-taiwan/fleuron";
+const REPO = "https://github.com/wilsonhyeh/fleuron";
 
 export const OFFICIAL_URLS = {
   website: "https://fleuron.study/",
@@ -68,7 +68,7 @@ export const UPDATER_INFRASTRUCTURE_ASSETS = [
  * wraps itself at render time.
  */
 export const PUBLISHER_VERIFICATION_NOTICE =
-  "Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at https://github.com/wilson-taiwan/fleuron/releases. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.";
+  "Fleuron is an independent open-source application. This build does not yet carry an Apple Developer ID/notarization or Windows Authenticode publisher signature, so your operating system cannot verify its publisher automatically. Download only from the official release page at https://github.com/wilsonhyeh/fleuron/releases. Continue only when the version, filename, and warning match this guide. A malware warning, checksum mismatch, or unexpected administrator request means stop.";
 
 /**
  * What each provenance signal actually proves — and what it does not. None of
@@ -160,7 +160,7 @@ export const MACOS_WARNING_CARDS: WarningCard[] = [
     explanation:
       "Expected for the official non-notarized, ad-hoc signed build. macOS is saying it cannot verify the publisher — not that it found malware.",
     userAction:
-      "Confirm you downloaded from github.com/wilson-taiwan/fleuron/releases, then System Settings \u2192 Privacy & Security \u2192 Open Anyway, authenticate, and Open. No Terminal steps are needed.",
+      "Confirm you downloaded from github.com/wilsonhyeh/fleuron/releases, then System Settings \u2192 Privacy & Security \u2192 Open Anyway, authenticate, and Open. No Terminal steps are needed.",
   },
   {
     signal: "\u201cWill damage your computer\u201d / malware alert / \u201cdamaged and cannot be opened\u201d",
@@ -395,13 +395,13 @@ export interface NetworkBehavior {
 export const NETWORK_BEHAVIOR: NetworkBehavior[] = [
   {
     purpose: "Update checks at startup and every four hours (is a newer release published?)",
-    endpoint: "api.github.com — wilson-taiwan/fleuron releases",
+    endpoint: "api.github.com — wilsonhyeh/fleuron releases",
     protocol: "Outbound HTTPS",
     enabledByDefault: true,
   },
   {
     purpose: "Downloading and installing an update after you approve it",
-    endpoint: "github.com/wilson-taiwan/fleuron/releases",
+    endpoint: "github.com/wilsonhyeh/fleuron/releases",
     protocol: "Outbound HTTPS",
     enabledByDefault: false,
   },
